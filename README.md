@@ -132,8 +132,8 @@ events/             JSONL timeline and replay
 - [x] jcode adapter
 - [x] Read-before-edit guard (LSP diagnostics: hook injected, live wiring v0.3)
 - [x] Model/provider/reasoning profile picker
-- [ ] Cost and retry budgets
-- [ ] GitHub CI and merge gates
+- [x] Cost and retry budgets
+- [x] GitHub CI and merge gates
 - [x] Structured execution timeline (JSONL events)
 
 ### v0.3
