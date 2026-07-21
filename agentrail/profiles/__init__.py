@@ -10,9 +10,11 @@ from agentrail.profiles.registry import (
     WorkKind,
     tier_for_work,
 )
+from agentrail.profiles.router import ModelRouter
 
 __all__ = [
     "DEFAULT_REGISTRY",
+    "ModelRouter",
     "ProfileRegistry",
     "Provider",
     "TierSpec",
