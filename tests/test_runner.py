@@ -217,3 +217,43 @@ def test_run_blocks_when_budget_exceeded(temp_git_repo: Path) -> None:
 
     types = [e.type for e in EventLog(temp_git_repo).read()]
     assert "budget.exceeded" in types
+
+
+def test_edit_guard_passing_allows_completion(temp_git_repo: Path) -> None:
+    from agentrail.checkpoints import SemanticEditGuard
+
+    init_config(temp_git_repo)
+    workflow = plan_workflow("Add a healthcheck endpoint")
+    workflow.status = WorkflowStatus.APPROVED
+    save_workflow(temp_git_repo, workflow)
+
+    guard = SemanticEditGuard(checks=[lambda _p: (True, "")])
+    runner = WorkflowRunner(
+        temp_git_repo,
+        adapter=FakeAdapter(),
+        edit_guard=guard,  # type: ignore[arg-type]
+    )
+    report = runner.run(workflow)
+    assert all(p.performed for p in report.stages)
+
+
+def test_edit_guard_failure_reverts_and_blocks(temp_git_repo: Path) -> None:
+    from agentrail.checkpoints import SemanticEditGuard
+    from agentrail.runner import StageBlockedError
+
+    init_config(temp_git_repo)
+    workflow = plan_workflow("Add a healthcheck endpoint")
+    workflow.status = WorkflowStatus.APPROVED
+    save_workflow(temp_git_repo, workflow)
+
+    guard = SemanticEditGuard(checks=[lambda _p: (False, "syntax error introduced")])
+    runner = WorkflowRunner(
+        temp_git_repo,
+        adapter=FakeAdapter(),
+        edit_guard=guard,  # type: ignore[arg-type]
+    )
+    with pytest.raises(StageBlockedError):
+        runner.run(workflow)
+
+    types = [e.type for e in EventLog(temp_git_repo).read()]
+    assert "stage.guard_reverted" in types

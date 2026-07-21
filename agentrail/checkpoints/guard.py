@@ -109,6 +109,16 @@ class SemanticEditGuard:
             failures=failures,
         )
 
+    def run_checks(self, path: Path) -> tuple[bool, str]:
+        """Public post-edit blast-radius check over ``path``.
+
+        Returns ``(ok, message)`` where ``message`` is the first failing check's
+        error log (empty when all pass). Used by the run loop to validate a
+        stage worktree after the harness edits it.
+        """
+
+        return self._run_checks(path)
+
     def _run_checks(self, path: Path) -> tuple[bool, str]:
         for check in self.checks:
             ok, message = check(path)

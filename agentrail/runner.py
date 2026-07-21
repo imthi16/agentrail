@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agentrail.adapters import HarnessAdapter, JcodeAdapter
-from agentrail.checkpoints import CheckpointStore
+from agentrail.checkpoints import CheckpointStore, SemanticEditGuard
 from agentrail.config import Budget, load_config
 from agentrail.events import EventLog, new_id
 from agentrail.git import PullRequestManager
@@ -71,6 +71,7 @@ class WorkflowRunner:
     default_base: str = "main"
     adapter: HarnessAdapter = field(default_factory=JcodeAdapter)
     provider: Provider = Provider.ANTHROPIC
+    edit_guard: SemanticEditGuard | None = None
 
     def __post_init__(self) -> None:
         self._log = EventLog(self.root)
@@ -246,6 +247,24 @@ class WorkflowRunner:
             cwd=Path(worktree.path),
             dry_run=False,
         )
+
+        # Post-edit Semantic Edit Guard (blast-radius check). If any check fails,
+        # auto-revert the worktree to the checkpoint and block the stage.
+        if self.edit_guard is not None:
+            ok, message = self.edit_guard.run_checks(Path(worktree.path))
+            if not ok:
+                self._checkpoints.rollback(stage.id, Path(worktree.path), checkpoint_id)
+                stage.status = StageStatus.BLOCKED
+                self._log.emit(
+                    type="stage.guard_reverted",
+                    workflow_id=workflow.workflow_id,
+                    trace_id=trace,
+                    span_id=span,
+                    stage_id=stage.id,
+                    mode=self.mode,
+                    attributes={"error": message, "checkpoint_id": checkpoint_id},
+                )
+                raise StageBlockedError(f"stage {stage.id!r} blocked by edit guard: {message}")
 
         pr_ref = self._prs.create_for_stage(stage, workflow, dry_run=not self._prs_ready())
         stage.pull_request = pr_ref
