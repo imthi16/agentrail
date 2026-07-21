@@ -11,3 +11,15 @@ build/
 .agentrail/events/
 .agentrail/checkpoints/
 .env
+
+# --- Added for Claude Code + AgentRail runtime ---
+# Machine-local memory (copy to ~/.claude/CLAUDE.md instead of committing)
+CLAUDE.local.md
+.claude/settings.local.json
+
+# AgentRail runtime state files
+.agentrail/config.yaml
+.agentrail/workflow.yaml
+
+# Git bundles produced when exporting the repo
+*.bundle

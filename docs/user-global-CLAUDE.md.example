@@ -1,0 +1,25 @@
+# Personal Preferences (all projects) — TEMPLATE
+
+# Copy this file to ~/.claude/CLAUDE.md on your machine. It is your MACHINE-LOCAL
+# user memory (loads in every project). Do NOT rely on this copy in the repo as
+# active memory — it lives here only as a shareable starting point.
+
+## General workflow
+- Prefer `pip install -e ".[dev]"` (or `uv pip install -e ".[dev]"`) for setup.
+- Use `ruff` for lint+format, `pytest` for tests, `mypy` (strict) for types.
+- Explain non-obvious decisions in one line; show diffs before applying them.
+- Ask before running anything destructive (`rm -rf`, force-push, history rewrite).
+
+## AgentRail-specific personal notes
+- Default to `plan` mode when exploring an unfamiliar subsystem.
+- When testing tmux code locally, use a dedicated socket so it never touches my
+  real tmux server:
+  `libtmux.Server(socket_name="agentrail_dev")`.
+- Isolated worktrees live under `.agentrail/worktrees/<stage-id>/`; runtime state
+  under `.agentrail/` is gitignored — don't commit it.
+- Verify model IDs against provider docs before pinning; they rotate often (the
+  effort-tier → model_id mapping lives in agentrail/profiles config).
+- Canonical smoke test:
+  `agentrail plan "Implement login and logout as separate PRs"` then `status`.
+
+<!-- Keep this file short; it loads in every session across every project. -->
