@@ -1,7 +1,7 @@
 """Project configuration — load/write ``.agentrail/config.yaml``.
 
-Holds project-level defaults (mode, profile, harness). Validated on load via a
-pydantic model so malformed config fails loudly rather than silently.
+Holds project-level defaults (mode, profile, harness, budgets). Validated on
+load via a pydantic model so malformed config fails loudly rather than silently.
 """
 
 from __future__ import annotations
@@ -9,12 +9,27 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from agentrail.models import Mode
 
 AGENTRAIL_DIR = ".agentrail"
 CONFIG_FILENAME = "config.yaml"
+
+
+class Budget(BaseModel):
+    """Cost and retry ceilings for a workflow (enforced by BudgetTracker).
+
+    ``None`` on a spend limit means "unbounded". ``max_retries_per_stage`` caps
+    edit-guard / stage retries. Deny-closed: exceeding any set limit blocks
+    further spend.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_usd: float | None = Field(default=None, ge=0)
+    max_tokens: int | None = Field(default=None, ge=0)
+    max_retries_per_stage: int = Field(default=2, ge=0)
 
 
 class Config(BaseModel):
@@ -25,6 +40,7 @@ class Config(BaseModel):
     default_mode: Mode = Mode.PLAN
     default_profile: str = "balanced"
     harness: str = "jcode"
+    budget: Budget = Field(default_factory=Budget)
 
 
 def config_dir(root: Path) -> Path:
