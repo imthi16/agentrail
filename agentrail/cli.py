@@ -16,6 +16,7 @@ from agentrail import __version__
 from agentrail.checkpoints import CheckpointError, CheckpointStore
 from agentrail.config import config_path, init_config, load_config
 from agentrail.events import EventLog, new_id
+from agentrail.git import PullRequestError, PullRequestManager
 from agentrail.models import Stage, Workflow, WorkflowStatus
 from agentrail.runner import WorkflowRunner
 from agentrail.workflow import (
@@ -164,6 +165,65 @@ def rollback(
         attributes={"checkpoint_id": target, "git_head": head},
     )
     console.print(f"[green]Rolled back[/green] {stage_id} → {target} ({head[:12]})")
+
+
+@app.command()
+def ready(
+    stage_id: str = typer.Argument("", help="Stage id to promote (default: all stages with a PR)."),
+    checks_passed: bool = typer.Option(
+        False,
+        "--checks-passed/--checks-failed",
+        help="Assert the quality gate (CI/tests) passed for the stage(s).",
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Do not call gh; report only."),
+) -> None:
+    """Promote stage draft PR(s) to ready when the merge gate passes.
+
+    Merge gate = acceptance criteria present AND --checks-passed. Fails closed.
+    """
+
+    root = _root()
+    workflow = _load_or_exit(root)
+    manager = PullRequestManager(root)
+
+    targets = [
+        s
+        for s in workflow.stages
+        if s.pull_request is not None and (not stage_id or s.id == stage_id)
+    ]
+    if stage_id and not any(s.id == stage_id for s in workflow.stages):
+        console.print(f"[red]Unknown stage:[/red] {stage_id}")
+        raise typer.Exit(code=1)
+    if not targets:
+        console.print("[yellow]No stages with a PR to promote.[/yellow] Run `agentrail run`.")
+        raise typer.Exit(code=1)
+
+    promoted = 0
+    for stage in targets:
+        assert stage.pull_request is not None
+        try:
+            updated = manager.mark_ready(
+                stage.pull_request, stage, checks_passed=checks_passed, dry_run=dry_run
+            )
+        except PullRequestError as exc:
+            console.print(f"[red]{stage.id}: merge gate blocked[/red] — {exc}")
+            continue
+        stage.pull_request = updated
+        state = "ready" if not updated.draft else "draft (degraded/dry-run)"
+        console.print(f"[green]{stage.id}[/green] → {state}")
+        EventLog(root).emit(
+            type="pr.ready" if not updated.draft else "pr.ready_skipped",
+            workflow_id=workflow.workflow_id,
+            trace_id=new_id(),
+            stage_id=stage.id,
+            mode=workflow.mode,
+            attributes={"checks_passed": checks_passed, "dry_run": dry_run},
+        )
+        if not updated.draft:
+            promoted += 1
+
+    save_workflow(root, workflow)
+    console.print(f"Promoted {promoted}/{len(targets)} PR(s) to ready.")
 
 
 def _render_stages(stages: list[Stage]) -> None:

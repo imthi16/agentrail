@@ -65,3 +65,47 @@ def test_commands_emit_events(in_project: Path) -> None:
 
     planned = next(e for e in events if e.type == "workflow.planned")
     assert planned.attributes["stage_ids"] == ["analyse", "login", "logout"]
+
+
+def _seed_workflow_with_pr(root: Path) -> None:
+    """Persist a workflow whose login stage has a draft PR ref + criteria."""
+    from agentrail.config import init_config
+    from agentrail.models import PullRequestRef, Stage, Workflow
+    from agentrail.workflow import save_workflow
+
+    init_config(root)
+    stage = Stage(
+        id="login",
+        title="Implement login",
+        acceptance_criteria=["login works and is tested"],
+        pull_request=PullRequestRef(number=None, base="main", head="stage/login"),
+    )
+    save_workflow(root, Workflow(goal="g", stages=[stage]))
+
+
+def test_ready_dry_run_reports_without_promoting(in_project: Path) -> None:
+    _seed_workflow_with_pr(in_project)
+    result = runner.invoke(app, ["ready", "login", "--checks-passed", "--dry-run"])
+    assert result.exit_code == 0
+    # number is None (degraded create) so it stays a draft; command still succeeds.
+    assert "login" in result.stdout
+
+
+def test_ready_blocks_when_checks_failed(in_project: Path) -> None:
+    _seed_workflow_with_pr(in_project)
+    result = runner.invoke(app, ["ready", "login", "--checks-failed"])
+    assert result.exit_code == 0  # command runs; gate blocks the stage
+    assert "blocked" in result.stdout.lower()
+    types = [e.type for e in EventLog(in_project).read()]
+    assert "pr.ready" not in types  # nothing promoted
+
+
+def test_ready_without_pr_stages_exits_nonzero(in_project: Path) -> None:
+    from agentrail.config import init_config
+    from agentrail.models import Stage, Workflow
+    from agentrail.workflow import save_workflow
+
+    init_config(in_project)
+    save_workflow(in_project, Workflow(goal="g", stages=[Stage(id="a", title="A")]))
+    result = runner.invoke(app, ["ready"])
+    assert result.exit_code == 1
