@@ -51,3 +51,24 @@ def test_resolve_in_worktree_stays_in_worktree(temp_git_repo: Path) -> None:
     mgr.create("login", base="main")
     resolved = mgr.resolve_in_worktree("login", "src/app.py")
     assert resolved.is_relative_to(worktree_path(temp_git_repo, "login").resolve())
+
+
+def test_create_is_idempotent_when_worktree_exists(temp_git_repo: Path) -> None:
+    mgr = WorktreeManager(temp_git_repo)
+    first = mgr.create("login", base="main")
+    again = mgr.create("login", base="main")  # must not raise
+    assert first.path == again.path
+    assert first.branch == again.branch
+
+
+def test_create_recovers_when_only_branch_exists(temp_git_repo: Path) -> None:
+    mgr = WorktreeManager(temp_git_repo)
+    # Simulate a prior run that left the branch but no worktree.
+    mgr.create("login", base="main")
+    mgr.remove("login")
+    assert mgr.branch_exists("stage/login") is True
+    assert not worktree_path(temp_git_repo, "login").exists()
+
+    recovered = mgr.create("login", base="main")  # attaches to existing branch
+    assert recovered.branch == "stage/login"
+    assert worktree_path(temp_git_repo, "login").is_dir()

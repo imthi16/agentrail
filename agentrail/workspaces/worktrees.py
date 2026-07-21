@@ -60,13 +60,33 @@ class WorktreeManager:
         return completed
 
     def create(self, stage_id: str, base: str) -> WorktreeRef:
-        """Create ``stage/<id>`` at ``.agentrail/worktrees/<id>`` from ``base``."""
+        """Create ``stage/<id>`` at ``.agentrail/worktrees/<id>`` from ``base``.
+
+        Recoverable across re-runs: if the worktree path already exists it is
+        reused; if only the branch exists (from a prior blocked/partial run) a
+        worktree is attached to it; otherwise a fresh branch + worktree is made.
+        """
 
         path = worktree_path(self.repo_root, stage_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         branch = branch_name(stage_id)
-        self._git("worktree", "add", "-b", branch, str(path), base)
+
+        if path.exists() and (path / ".git").exists():
+            return WorktreeRef(path=str(path), branch=branch, base=base)
+
+        if self.branch_exists(branch):
+            # Branch left behind by an earlier run; attach a worktree to it.
+            self._git("worktree", "add", str(path), branch)
+        else:
+            self._git("worktree", "add", "-b", branch, str(path), base)
         return WorktreeRef(path=str(path), branch=branch, base=base)
+
+    def branch_exists(self, branch: str) -> bool:
+        completed = self.runner(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+            self.repo_root,
+        )
+        return completed.returncode == 0
 
     def list(self) -> list[dict[str, str]]:
         """Parse ``git worktree list --porcelain`` into a list of records."""
