@@ -49,7 +49,7 @@ agentrail resume
 agentrail rollback <stage-id>
 ```
 
-The current scaffold implements `version`, `init`, `plan`, `status`, `approve`, `run` (with `--dry-run`), `pause`, `resume`, and `rollback`.
+The current scaffold implements `version`, `init`, `plan`, `status`, `approve`, `run` (with `--dry-run`), `pause`, `resume`, `rollback`, and `ready` (merge-gate PR promotion).
 
 ## Installation
 
