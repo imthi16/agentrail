@@ -16,12 +16,13 @@ dependencies = [
     "typer>=0.12",
     "rich>=13.7",
     "pyyaml>=6.0",
+    "pydantic>=2.7",
     "libtmux>=0.58,<0.61",  # pre-1.0: pin narrow, re-verify object model on upgrade
     "GitPython>=3.1",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "mypy>=1.10", "ruff>=0.5"]
+dev = ["pytest>=8.0", "mypy>=1.10", "ruff>=0.5", "types-PyYAML>=6.0"]
 remote = ["fastapi>=0.111", "uvicorn>=0.30"]  # v0.3 remote control plane
 
 [project.scripts]
@@ -33,7 +34,15 @@ include = ["agentrail*"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
+plugins = ["pydantic.mypy"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
