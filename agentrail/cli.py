@@ -18,7 +18,7 @@ from agentrail.config import config_path, init_config, load_config
 from agentrail.events import EventLog, new_id
 from agentrail.git import PullRequestError, PullRequestManager
 from agentrail.models import Stage, Workflow, WorkflowStatus
-from agentrail.runner import WorkflowRunner
+from agentrail.runner import StageBlockedError, WorkflowRunner
 from agentrail.workflow import (
     WorkflowValidationError,
     load_workflow,
@@ -74,7 +74,7 @@ def plan(goal: str = typer.Argument(..., help="Natural-language goal to plan."))
 
     root = _root()
     try:
-        load_config(root)
+        config = load_config(root)
     except FileNotFoundError:
         console.print("[red]No AgentRail project here.[/red] Run `agentrail init` first.")
         raise typer.Exit(code=1) from None
@@ -85,6 +85,9 @@ def plan(goal: str = typer.Argument(..., help="Natural-language goal to plan."))
         console.print(f"[red]Planning failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
 
+    # Seed the workflow's operating mode from the project config so `run`
+    # enforces the configured mode (e.g. auto) rather than always defaulting.
+    workflow.mode = config.default_mode
     path = save_workflow(root, workflow)
     EventLog(root).emit(
         type="workflow.planned",
@@ -232,12 +235,19 @@ def _render_stages(stages: list[Stage]) -> None:
     table.add_column("title")
     table.add_column("depends_on")
     table.add_column("status")
+    table.add_column("PR")
     for stage in stages:
+        pr = "-"
+        if stage.pull_request is not None:
+            state = "draft" if stage.pull_request.draft else "ready"
+            num = stage.pull_request.number
+            pr = f"#{num} {state}" if num is not None else state
         table.add_row(
             stage.id,
             stage.title,
             ", ".join(stage.depends_on) or "-",
             stage.status.value,
+            pr,
         )
     console.print(table)
 
@@ -282,7 +292,15 @@ def run(
         raise typer.Exit(code=1)
 
     runner = WorkflowRunner(root, mode=workflow.mode)
-    report = runner.run(workflow, dry_run=dry_run)
+    try:
+        report = runner.run(workflow, dry_run=dry_run)
+    except StageBlockedError as exc:
+        console.print(f"[red]Blocked by policy:[/red] {exc}")
+        console.print(
+            "[yellow]Fix the Intent Lock / mode, then re-run.[/yellow] "
+            "State was saved (status: paused)."
+        )
+        raise typer.Exit(code=2) from exc
 
     label = "DRY-RUN plan" if dry_run else "Executed"
     console.print(f"[green]{label}[/green] for {len(report.stages)} stage(s):")

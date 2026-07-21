@@ -102,7 +102,26 @@ class WorkflowRunner:
         )
 
         for stage in topological_order(workflow.stages):
-            report.stages.append(self._run_stage(workflow, stage, trace, dry_run))
+            try:
+                report.stages.append(self._run_stage(workflow, stage, trace, dry_run))
+            except StageBlockedError:
+                # Persist partial state (BLOCKED status, any worktrees/checkpoints
+                # already created) so status/rollback/re-run can see it.
+                if not dry_run:
+                    workflow.status = WorkflowStatus.PAUSED
+                    save_workflow(self.root, workflow)
+                self._log.emit(
+                    type="workflow.run_finished",
+                    workflow_id=workflow.workflow_id,
+                    trace_id=trace,
+                    mode=self.mode,
+                    attributes={
+                        "dry_run": dry_run,
+                        "stages": len(report.stages),
+                        "blocked_stage": stage.id,
+                    },
+                )
+                raise
 
         if not dry_run:
             workflow.status = WorkflowStatus.COMPLETED
