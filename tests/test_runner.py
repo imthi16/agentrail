@@ -82,6 +82,21 @@ def test_dry_run_emits_run_events(project_root: Path) -> None:
     assert "workflow.run_finished" in types
 
 
+def test_run_started_records_budget_from_config(project_root: Path) -> None:
+    from agentrail.config import Budget, Config, write_config
+
+    write_config(project_root, Config(budget=Budget(max_usd=12.5, max_tokens=900_000)))
+    workflow = plan_workflow(GOAL)
+    workflow.status = WorkflowStatus.APPROVED
+    WorkflowRunner(project_root).run(workflow, dry_run=True)
+
+    started = next(
+        e for e in EventLog(project_root).read() if e.type == "workflow.run_started"
+    )
+    assert started.attributes["budget_max_usd"] == 12.5
+    assert started.attributes["budget_max_tokens"] == 900_000
+
+
 def test_real_run_creates_worktrees_and_checkpoints(temp_git_repo: Path) -> None:
     init_config(temp_git_repo)
     workflow = plan_workflow(GOAL)

@@ -17,6 +17,7 @@ from pathlib import Path
 
 from agentrail.adapters import HarnessAdapter, JcodeAdapter
 from agentrail.checkpoints import CheckpointStore
+from agentrail.config import Budget, load_config
 from agentrail.events import EventLog, new_id
 from agentrail.git import PullRequestManager
 from agentrail.models import Mode, Stage, StageStatus, Workflow, WorkflowStatus
@@ -63,6 +64,13 @@ class WorkflowRunner:
         self._worktrees = WorktreeManager(self.root)
         self._checkpoints = CheckpointStore(self.root)
         self._prs = PullRequestManager(self.root, default_base=self.default_base)
+        self._budget = self._load_budget()
+
+    def _load_budget(self) -> Budget:
+        try:
+            return load_config(self.root).budget
+        except (FileNotFoundError, ValueError):
+            return Budget()
 
     def run(self, workflow: Workflow, *, dry_run: bool = False) -> RunReport:
         """Run every stage in dependency order; persist status transitions."""
@@ -80,7 +88,12 @@ class WorkflowRunner:
             workflow_id=workflow.workflow_id,
             trace_id=trace,
             mode=self.mode,
-            attributes={"dry_run": dry_run},
+            attributes={
+                "dry_run": dry_run,
+                "budget_max_usd": self._budget.max_usd,
+                "budget_max_tokens": self._budget.max_tokens,
+                "budget_max_retries_per_stage": self._budget.max_retries_per_stage,
+            },
         )
 
         for stage in topological_order(workflow.stages):
