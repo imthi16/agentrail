@@ -90,9 +90,7 @@ def test_run_started_records_budget_from_config(project_root: Path) -> None:
     workflow.status = WorkflowStatus.APPROVED
     WorkflowRunner(project_root).run(workflow, dry_run=True)
 
-    started = next(
-        e for e in EventLog(project_root).read() if e.type == "workflow.run_started"
-    )
+    started = next(e for e in EventLog(project_root).read() if e.type == "workflow.run_started")
     assert started.attributes["budget_max_usd"] == 12.5
     assert started.attributes["budget_max_tokens"] == 900_000
 

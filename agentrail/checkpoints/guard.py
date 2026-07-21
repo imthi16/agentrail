@@ -83,9 +83,7 @@ class SemanticEditGuard:
         """
 
         if path.exists() and not self._was_read(path, expected_prior):
-            raise EditGuardError(
-                f"read-before-edit violated: {path} was not read before editing"
-            )
+            raise EditGuardError(f"read-before-edit violated: {path} was not read before editing")
 
         failures: list[str] = []
         retry_context = ""

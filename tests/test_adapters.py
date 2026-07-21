@@ -49,9 +49,7 @@ def test_jcode_capabilities() -> None:
 
 
 def test_jcode_dry_run_start_does_not_execute(tmp_path: Path) -> None:
-    handle = JcodeAdapter().start(
-        "hi", mode=Mode.PLAN, model_id=None, cwd=tmp_path, dry_run=True
-    )
+    handle = JcodeAdapter().start("hi", mode=Mode.PLAN, model_id=None, cwd=tmp_path, dry_run=True)
     assert handle.started is False
     assert handle.argv == ["jcode", "run", "hi"]
 

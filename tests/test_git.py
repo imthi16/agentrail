@@ -5,13 +5,16 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from agentrail.git import (
     GitRepo,
+    PullRequestError,
     PullRequestManager,
     base_branch_for,
     build_create_command,
 )
-from agentrail.models import Stage, Workflow
+from agentrail.models import PullRequestRef, Stage, Workflow
 
 
 # --- GitRepo (real temp repo) ----------------------------------------------
@@ -84,9 +87,7 @@ def test_create_parses_pr_number_from_url(tmp_path: Path) -> None:
     def fake(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
         if args[:2] == ["gh", "auth"]:
             return subprocess.CompletedProcess(args, 0, "", "")
-        return subprocess.CompletedProcess(
-            args, 0, "https://github.com/acme/app/pull/42\n", ""
-        )
+        return subprocess.CompletedProcess(args, 0, "https://github.com/acme/app/pull/42\n", "")
 
     wf = _login_logout()
     login = next(s for s in wf.stages if s.id == "login")
@@ -108,3 +109,52 @@ def test_create_degrades_when_unauthenticated(tmp_path: Path) -> None:
     ref = mgr.create_for_stage(logout, wf)
     assert ref.number is None
     assert ref.base == "stage/analyse"
+
+
+# --- Merge gate (gh pr ready) ----------------------------------------------
+def _pr_ready_stage() -> Stage:
+    return Stage(
+        id="login",
+        title="Implement login",
+        acceptance_criteria=["login works and is tested"],
+    )
+
+
+def test_mark_ready_blocked_when_checks_fail(tmp_path: Path) -> None:
+    pr = PullRequestRef(number=7, base="main", head="stage/login")
+    mgr = PullRequestManager(tmp_path)
+    with pytest.raises(PullRequestError):
+        mgr.mark_ready(pr, _pr_ready_stage(), checks_passed=False)
+
+
+def test_mark_ready_blocked_without_acceptance_criteria(tmp_path: Path) -> None:
+    pr = PullRequestRef(number=7, base="main", head="stage/login")
+    bare = Stage(id="login", title="Login")  # no acceptance criteria
+    mgr = PullRequestManager(tmp_path)
+    with pytest.raises(PullRequestError):
+        mgr.mark_ready(pr, bare, checks_passed=True)
+
+
+def test_mark_ready_promotes_when_gate_passes(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def fake(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    pr = PullRequestRef(number=7, base="main", head="stage/login")
+    mgr = PullRequestManager(tmp_path, runner=fake)
+    result = mgr.mark_ready(pr, _pr_ready_stage(), checks_passed=True)
+
+    assert result.draft is False
+    assert ["gh", "pr", "ready", "7"] in calls
+
+
+def test_mark_ready_dry_run_does_not_invoke(tmp_path: Path) -> None:
+    def spy(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("dry-run must not invoke gh")
+
+    pr = PullRequestRef(number=7, base="main", head="stage/login")
+    mgr = PullRequestManager(tmp_path, runner=spy)
+    result = mgr.mark_ready(pr, _pr_ready_stage(), checks_passed=True, dry_run=True)
+    assert result.draft is True  # unchanged

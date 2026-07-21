@@ -38,4 +38,3 @@ def temp_git_repo(tmp_path: Path) -> Iterator[Path]:
     _run(["git", "add", "."], tmp_path)
     _run(["git", "commit", "-m", "initial"], tmp_path)
     yield tmp_path
-

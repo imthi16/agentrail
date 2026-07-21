@@ -134,6 +134,45 @@ class PullRequestManager:
         number = _parse_pr_number(url) if url else None
         return PullRequestRef(number=number, base=base, head=head, url=url, draft=True)
 
+    def mark_ready(
+        self,
+        pr: PullRequestRef,
+        stage: Stage,
+        *,
+        checks_passed: bool,
+        dry_run: bool = False,
+    ) -> PullRequestRef:
+        """Promote a draft PR to ready ONLY when the merge gate is satisfied.
+
+        Gate = acceptance criteria present AND ``checks_passed`` (CI/quality
+        gates). Fails closed: an unmet gate leaves the PR a draft and raises.
+        On dry-run or when gh is unavailable the ref is returned unchanged.
+        """
+
+        if not self._merge_gate_ok(stage, checks_passed):
+            raise PullRequestError(
+                f"merge gate not satisfied for stage {stage.id!r}: "
+                f"checks_passed={checks_passed}, "
+                f"acceptance_criteria={len(stage.acceptance_criteria)}"
+            )
+        if pr.number is None:
+            # Nothing to promote (dry-run / degraded create): return as-is.
+            return pr
+        if dry_run or not gh_authenticated(self.runner, self.repo_root):
+            return pr
+
+        completed = self.runner(["gh", "pr", "ready", str(pr.number)], self.repo_root)
+        if completed.returncode != 0:
+            raise PullRequestError(
+                f"gh pr ready failed ({completed.returncode}): "
+                f"{completed.stderr.strip() or completed.stdout.strip()}"
+            )
+        return pr.model_copy(update={"draft": False})
+
+    @staticmethod
+    def _merge_gate_ok(stage: Stage, checks_passed: bool) -> bool:
+        return checks_passed and bool(stage.acceptance_criteria)
+
 
 def _parse_pr_number(url: str) -> int | None:
     tail = url.rstrip("/").rsplit("/", 1)[-1]

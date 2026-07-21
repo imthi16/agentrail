@@ -58,9 +58,7 @@ class GateOutcome:
 
     @property
     def allowed(self) -> bool:
-        return self.decision is Decision.ALLOW or (
-            self.decision is Decision.ASK and self.performed
-        )
+        return self.decision is Decision.ALLOW or (self.decision is Decision.ASK and self.performed)
 
 
 class PolicyGate:

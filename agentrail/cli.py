@@ -109,7 +109,7 @@ def status() -> None:
     try:
         workflow = load_workflow(root)
     except FileNotFoundError:
-        console.print("[yellow]No workflow yet.[/yellow] Run `agentrail plan \"<goal>\"`.")
+        console.print('[yellow]No workflow yet.[/yellow] Run `agentrail plan "<goal>"`.')
         raise typer.Exit(code=1) from None
 
     console.print(f"[bold]Goal:[/bold] {workflow.goal}")
@@ -131,7 +131,7 @@ def rollback(
     try:
         workflow = load_workflow(root)
     except FileNotFoundError:
-        console.print("[yellow]No workflow yet.[/yellow] Run `agentrail plan \"<goal>\"`.")
+        console.print('[yellow]No workflow yet.[/yellow] Run `agentrail plan "<goal>"`.')
         raise typer.Exit(code=1) from None
 
     stage = next((s for s in workflow.stages if s.id == stage_id), None)
@@ -284,7 +284,7 @@ def _load_or_exit(root: Path) -> Workflow:
     try:
         return load_workflow(root)
     except FileNotFoundError:
-        console.print("[yellow]No workflow yet.[/yellow] Run `agentrail plan \"<goal>\"`.")
+        console.print('[yellow]No workflow yet.[/yellow] Run `agentrail plan "<goal>"`.')
         raise typer.Exit(code=1) from None
 
 

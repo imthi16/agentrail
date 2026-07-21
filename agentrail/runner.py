@@ -111,9 +111,7 @@ class WorkflowRunner:
         )
         return report
 
-    def _run_stage(
-        self, workflow: Workflow, stage: Stage, trace: str, dry_run: bool
-    ) -> StagePlan:
+    def _run_stage(self, workflow: Workflow, stage: Stage, trace: str, dry_run: bool) -> StagePlan:
         base = self._stage_base(stage, workflow)
         span = new_id()
         self._log.emit(
