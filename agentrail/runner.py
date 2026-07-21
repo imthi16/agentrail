@@ -20,10 +20,15 @@ from agentrail.checkpoints import CheckpointStore
 from agentrail.config import Budget, load_config
 from agentrail.events import EventLog, new_id
 from agentrail.git import PullRequestManager
-from agentrail.models import Mode, Stage, StageStatus, Workflow, WorkflowStatus
+from agentrail.models import IntentLock, Mode, Stage, StageStatus, Workflow, WorkflowStatus
+from agentrail.policies import PolicyGate, read_lock, verify_stage_lock
 from agentrail.tmux import tmux_available
 from agentrail.workflow import save_workflow, topological_order
 from agentrail.workspaces import WorktreeManager
+
+
+class StageBlockedError(RuntimeError):
+    """Raised when policy admission control refuses to run a stage."""
 
 
 @dataclass
@@ -149,10 +154,32 @@ class WorkflowRunner:
         stage.worktree = worktree
         stage.status = StageStatus.RUNNING
 
+        # Checkpoint BEFORE anything mutating runs (mandatory before `auto`).
         checkpoint_id = self._checkpoints.create(stage.id, Path(worktree.path))
         stage.checkpoints.append(checkpoint_id)
 
-        # Harness runs under the policies gate; here we record the intended argv.
+        # Admission control (invariant #1): build a PolicyGate for this stage's
+        # worktree + mode + Intent Lock, enforced in code before the harness
+        # acts. `auto` is refused without a verified lock; a recorded lock hash
+        # that no longer matches the on-disk lock fails closed.
+        gate = self._build_gate(workflow, stage, worktree_root=Path(worktree.path), trace=trace)
+        admit_ok, admit_reason = self._admit(stage, worktree_root=Path(worktree.path))
+        if not admit_ok:
+            stage.status = StageStatus.BLOCKED
+            self._log.emit(
+                type="stage.blocked",
+                workflow_id=workflow.workflow_id,
+                trace_id=trace,
+                span_id=span,
+                stage_id=stage.id,
+                mode=self.mode,
+                attributes={"reason": admit_reason, "checkpoint_id": checkpoint_id},
+            )
+            raise StageBlockedError(f"stage {stage.id!r} blocked: {admit_reason}")
+
+        # Harness runs under the policies gate (enforced above; the gate object
+        # is handed to the adapter transport when live I/O lands in v0.3).
+        _ = gate
         handle = self.adapter.start(
             prompt, mode=self.mode, model_id=None, cwd=Path(worktree.path), dry_run=False
         )
@@ -206,3 +233,48 @@ class WorkflowRunner:
         if not GitRepo(self.root).has_remote():
             return False
         return gh_authenticated(cwd=self.root)
+
+    def _load_stage_lock(self, stage: Stage) -> IntentLock | None:
+        if stage.intent_lock_hash is None:
+            return None
+        try:
+            return read_lock(self.root, stage.id)
+        except (FileNotFoundError, ValueError):
+            return None
+
+    def _build_gate(
+        self, workflow: Workflow, stage: Stage, *, worktree_root: Path, trace: str
+    ) -> PolicyGate:
+        """Construct the per-stage enforcement gate (invariant #1)."""
+
+        lock = self._load_stage_lock(stage)
+        return PolicyGate(
+            workspace_root=worktree_root,
+            mode=self.mode,
+            workflow_id=workflow.workflow_id,
+            event_log=self._log,
+            intent_lock=lock,
+            recorded_hash=stage.intent_lock_hash,
+            stage_id=stage.id,
+            trace_id=trace,
+        )
+
+    def _admit(self, stage: Stage, *, worktree_root: Path) -> tuple[bool, str]:
+        """Decide whether a stage may run under the current mode + Intent Lock.
+
+        Fails closed: `auto` requires a verified Intent Lock, and any recorded
+        lock hash must still match the on-disk lock.
+        """
+
+        if stage.intent_lock_hash is not None:
+            if not verify_stage_lock(self.root, stage):
+                return False, "Intent Lock hash mismatch or missing lock file"
+
+        if self.mode is Mode.AUTO:
+            if stage.intent_lock_hash is None:
+                return False, "auto mode requires an Intent Lock for the stage"
+            lock = self._load_stage_lock(stage)
+            if lock is None or not lock.allowed_paths:
+                return False, "auto mode requires an Intent Lock with allowed_paths"
+
+        return True, "admitted"

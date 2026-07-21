@@ -113,3 +113,73 @@ def test_real_run_creates_worktrees_and_checkpoints(temp_git_repo: Path) -> None
     # Stacked bases hold on the real run too.
     by_id = {p.stage_id: p for p in report.stages}
     assert by_id["login"].worktree_base == "stage/analyse"
+
+
+def test_auto_mode_blocked_without_intent_lock(temp_git_repo: Path) -> None:
+    from agentrail.models import Mode
+    from agentrail.runner import StageBlockedError
+
+    init_config(temp_git_repo)
+    workflow = plan_workflow("Add a healthcheck endpoint")  # analyse -> implement
+    workflow.status = WorkflowStatus.APPROVED
+    save_workflow(temp_git_repo, workflow)
+
+    runner = WorkflowRunner(
+        temp_git_repo,
+        mode=Mode.AUTO,
+        adapter=FakeAdapter(),  # type: ignore[arg-type]
+    )
+    with pytest.raises(StageBlockedError):
+        runner.run(workflow, dry_run=False)
+
+    # A stage.blocked event is recorded with the reason.
+    blocked = [e for e in EventLog(temp_git_repo).read() if e.type == "stage.blocked"]
+    assert blocked
+    assert "Intent Lock" in blocked[0].attributes["reason"]
+
+
+def test_auto_mode_admitted_with_bound_lock(temp_git_repo: Path) -> None:
+    from agentrail.models import IntentLock, Mode
+    from agentrail.policies import bind_lock_to_stage
+
+    init_config(temp_git_repo)
+    workflow = plan_workflow("Add a healthcheck endpoint")
+    workflow.status = WorkflowStatus.APPROVED
+    # Bind an Intent Lock (with allowed_paths) to every stage.
+    for stage in workflow.stages:
+        bind_lock_to_stage(temp_git_repo, stage, IntentLock(allowed_paths=["src"]))
+    save_workflow(temp_git_repo, workflow)
+
+    runner = WorkflowRunner(
+        temp_git_repo,
+        mode=Mode.AUTO,
+        adapter=FakeAdapter(),  # type: ignore[arg-type]
+    )
+    report = runner.run(workflow, dry_run=False)
+    assert workflow.status is WorkflowStatus.COMPLETED
+    assert all(p.performed for p in report.stages)
+
+
+def test_tampered_lock_blocks_stage(temp_git_repo: Path) -> None:
+    import yaml
+
+    from agentrail.models import IntentLock
+    from agentrail.policies import bind_lock_to_stage, lock_path
+    from agentrail.runner import StageBlockedError
+
+    init_config(temp_git_repo)
+    workflow = plan_workflow("Add a healthcheck endpoint")
+    workflow.status = WorkflowStatus.APPROVED
+    stage = workflow.stages[0]
+    bind_lock_to_stage(temp_git_repo, stage, IntentLock(allowed_paths=["src"]))
+    save_workflow(temp_git_repo, workflow)
+
+    # Tamper with the on-disk lock after the hash was recorded.
+    path = lock_path(temp_git_repo, stage.id)
+    data = yaml.safe_load(path.read_text())
+    data["allowed_paths"].append("/etc")
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    runner = WorkflowRunner(temp_git_repo, adapter=FakeAdapter())  # type: ignore[arg-type]
+    with pytest.raises(StageBlockedError):
+        runner.run(workflow, dry_run=False)
