@@ -12,6 +12,14 @@ from agentrail.policies.engine import (
     decide,
     verify_lock_hash,
 )
+from agentrail.policies.locks import (
+    bind_lock_to_stage,
+    lock_path,
+    read_lock,
+    verify_stage_lock,
+    verify_workflow_locks,
+    write_lock,
+)
 
 __all__ = [
     "Action",
@@ -20,6 +28,12 @@ __all__ = [
     "LockView",
     "PolicyEngine",
     "PolicyResult",
+    "bind_lock_to_stage",
     "decide",
+    "lock_path",
+    "read_lock",
     "verify_lock_hash",
+    "verify_stage_lock",
+    "verify_workflow_locks",
+    "write_lock",
 ]
