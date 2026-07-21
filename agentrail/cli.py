@@ -13,6 +13,7 @@ from rich.console import Console
 from rich.table import Table
 
 from agentrail import __version__
+from agentrail.checkpoints import CheckpointError, CheckpointStore
 from agentrail.config import config_path, init_config, load_config
 from agentrail.events import EventLog, new_id
 from agentrail.models import Stage
@@ -114,6 +115,54 @@ def status() -> None:
     console.print(f"[bold]Status:[/bold] {workflow.status.value}   mode: {workflow.mode.value}")
     console.print(f"[dim]{workflow_path(root)}[/dim]")
     _render_stages(workflow.stages)
+
+
+@app.command()
+def rollback(
+    stage_id: str = typer.Argument(..., help="Stage id to roll back."),
+    checkpoint_id: str = typer.Option(
+        "", "--checkpoint", "-c", help="Checkpoint id (default: latest)."
+    ),
+) -> None:
+    """Roll a stage's worktree back to a checkpoint (that worktree only)."""
+
+    root = _root()
+    try:
+        workflow = load_workflow(root)
+    except FileNotFoundError:
+        console.print("[yellow]No workflow yet.[/yellow] Run `agentrail plan \"<goal>\"`.")
+        raise typer.Exit(code=1) from None
+
+    stage = next((s for s in workflow.stages if s.id == stage_id), None)
+    if stage is None:
+        console.print(f"[red]Unknown stage:[/red] {stage_id}")
+        raise typer.Exit(code=1)
+    if stage.worktree is None:
+        console.print(f"[red]Stage {stage_id} has no worktree to roll back.[/red]")
+        raise typer.Exit(code=1)
+
+    store = CheckpointStore(root)
+    available = store.list(stage_id)
+    target = checkpoint_id or (available[-1] if available else "")
+    if not target:
+        console.print(f"[red]No checkpoints recorded for stage {stage_id}.[/red]")
+        raise typer.Exit(code=1)
+
+    try:
+        head = store.rollback(stage_id, Path(stage.worktree.path), target)
+    except CheckpointError as exc:
+        console.print(f"[red]Rollback failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    EventLog(root).emit(
+        type="stage.rolled_back",
+        workflow_id=workflow.workflow_id,
+        trace_id=new_id(),
+        stage_id=stage_id,
+        mode=workflow.mode,
+        attributes={"checkpoint_id": target, "git_head": head},
+    )
+    console.print(f"[green]Rolled back[/green] {stage_id} → {target} ({head[:12]})")
 
 
 def _render_stages(stages: list[Stage]) -> None:
