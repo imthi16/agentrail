@@ -14,6 +14,7 @@ from rich.table import Table
 
 from agentrail import __version__
 from agentrail.config import config_path, init_config, load_config
+from agentrail.events import EventLog, new_id
 from agentrail.models import Stage
 from agentrail.workflow import (
     WorkflowValidationError,
@@ -49,6 +50,13 @@ def init() -> None:
 
     root = _root()
     config, created = init_config(root)
+    EventLog(root).emit(
+        type="project.initialized",
+        workflow_id="-",
+        trace_id=new_id(),
+        mode=config.default_mode,
+        attributes={"created": created, "harness": config.harness},
+    )
     action = "Created" if created else "Found existing"
     console.print(f"[green]{action}[/green] {config_path(root)}")
     console.print(
@@ -75,6 +83,17 @@ def plan(goal: str = typer.Argument(..., help="Natural-language goal to plan."))
         raise typer.Exit(code=1) from exc
 
     path = save_workflow(root, workflow)
+    EventLog(root).emit(
+        type="workflow.planned",
+        workflow_id=workflow.workflow_id,
+        trace_id=new_id(),
+        mode=workflow.mode,
+        attributes={
+            "goal": workflow.goal,
+            "status": workflow.status.value,
+            "stage_ids": [s.id for s in workflow.stages],
+        },
+    )
     console.print(f"[green]Planned[/green] {len(workflow.stages)} stage(s) → {path}")
     console.print(f"  status: [yellow]{workflow.status.value}[/yellow]")
     _render_stages(workflow.stages)
