@@ -12,6 +12,12 @@ from agentrail.policies.engine import (
     decide,
     verify_lock_hash,
 )
+from agentrail.policies.gate import (
+    ApprovalCallback,
+    GateOutcome,
+    PolicyGate,
+    deny_all_approvals,
+)
 from agentrail.policies.locks import (
     bind_lock_to_stage,
     lock_path,
@@ -24,12 +30,16 @@ from agentrail.policies.locks import (
 __all__ = [
     "Action",
     "ActionType",
+    "ApprovalCallback",
     "Decision",
+    "GateOutcome",
     "LockView",
     "PolicyEngine",
+    "PolicyGate",
     "PolicyResult",
     "bind_lock_to_stage",
     "decide",
+    "deny_all_approvals",
     "lock_path",
     "read_lock",
     "verify_lock_hash",
