@@ -257,3 +257,121 @@ def test_edit_guard_failure_reverts_and_blocks(temp_git_repo: Path) -> None:
 
     types = [e.type for e in EventLog(temp_git_repo).read()]
     assert "stage.guard_reverted" in types
+
+
+class FailingAdapter:
+    """Adapter whose harness never starts (missing binary / nonzero exit)."""
+
+    name = "failing"
+
+    def build_argv(self, prompt: str, *, mode: Mode, model_id: str | None) -> list[str]:
+        return ["failing", "run", prompt]
+
+    def start(
+        self,
+        prompt: str,
+        *,
+        mode: Mode,
+        model_id: str | None,
+        cwd: Path,
+        dry_run: bool = False,
+    ) -> object:
+        from agentrail.adapters import SessionHandle
+
+        return SessionHandle(adapter=self.name, name="failing-run", cwd=cwd, started=False)
+
+
+def test_plan_mode_denies_harness_session(temp_git_repo: Path) -> None:
+    from agentrail.models import Mode
+    from agentrail.runner import StageBlockedError
+
+    init_config(temp_git_repo)
+    workflow = plan_workflow("Add a healthcheck endpoint")
+    workflow.status = WorkflowStatus.APPROVED
+    save_workflow(temp_git_repo, workflow)
+
+    runner = WorkflowRunner(
+        temp_git_repo,
+        mode=Mode.PLAN,
+        adapter=FakeAdapter(),  # type: ignore[arg-type]
+    )
+    with pytest.raises(StageBlockedError):
+        runner.run(workflow)
+
+    types = [e.type for e in EventLog(temp_git_repo).read()]
+    assert "policy.session_authorized" in types
+    assert "stage.blocked" in types
+
+
+def test_harness_failure_marks_stage_failed(temp_git_repo: Path) -> None:
+    from agentrail.models import StageStatus
+    from agentrail.runner import StageBlockedError
+
+    init_config(temp_git_repo)
+    workflow = plan_workflow("Add a healthcheck endpoint")
+    workflow.status = WorkflowStatus.APPROVED
+    save_workflow(temp_git_repo, workflow)
+
+    runner = WorkflowRunner(temp_git_repo, adapter=FailingAdapter())  # type: ignore[arg-type]
+    with pytest.raises(StageBlockedError):
+        runner.run(workflow)
+
+    # First stage must NOT be reported completed when the harness never started.
+    assert workflow.stages[0].status is StageStatus.FAILED
+    types = [e.type for e in EventLog(temp_git_repo).read()]
+    assert "stage.failed" in types
+    assert "stage.completed" not in types
+
+
+def test_stage_changes_are_committed_into_the_branch(temp_git_repo: Path) -> None:
+    """A stage that edits its worktree gets those edits committed on its branch."""
+    from agentrail.adapters import SessionHandle
+    from agentrail.git import GitRepo
+    from agentrail.workspaces import worktree_path
+
+    class EditingAdapter:
+        name = "editing"
+
+        def build_argv(self, prompt: str, *, mode: Mode, model_id: str | None) -> list[str]:
+            return ["editing"]
+
+        def start(self, prompt, *, mode, model_id, cwd, dry_run=False):  # type: ignore[no-untyped-def]
+            (Path(cwd) / "feature.txt").write_text("implemented\n", encoding="utf-8")
+            return SessionHandle(adapter=self.name, name="e", cwd=cwd, started=True)
+
+    init_config(temp_git_repo)
+    workflow = plan_workflow("Add a healthcheck endpoint")
+    workflow.status = WorkflowStatus.APPROVED
+    save_workflow(temp_git_repo, workflow)
+
+    runner = WorkflowRunner(temp_git_repo, adapter=EditingAdapter())  # type: ignore[arg-type]
+    runner.run(workflow)
+
+    # The edit is committed on the stage worktree (clean tree, file tracked).
+    wt = worktree_path(temp_git_repo, "analyse")
+    repo = GitRepo(wt)
+    assert repo.is_dirty() is False
+    assert (wt / "feature.txt").exists()
+    log = repo._git("log", "--oneline", "-1")
+    assert "[AgentRail]" in log
+
+
+def test_resume_skips_completed_stages(temp_git_repo: Path) -> None:
+    from agentrail.models import StageStatus
+
+    init_config(temp_git_repo)
+    workflow = plan_workflow(GOAL)  # analyse -> login, logout
+    workflow.status = WorkflowStatus.APPROVED
+    save_workflow(temp_git_repo, workflow)
+
+    runner = WorkflowRunner(temp_git_repo, adapter=FakeAdapter())  # type: ignore[arg-type]
+    runner.run(workflow)  # full run: every stage + branch now exists
+    assert all(s.status is StageStatus.COMPLETED for s in workflow.stages)
+
+    # Re-approve (as `resume` would) and re-run: all stages already completed,
+    # so every one is skipped, not redone.
+    workflow.status = WorkflowStatus.APPROVED
+    report = runner.run(workflow)
+    assert report.stages == []  # nothing re-executed
+    skipped = [e for e in EventLog(temp_git_repo).read() if e.type == "stage.skipped"]
+    assert {e.stage_id for e in skipped} >= {"analyse", "login", "logout"}

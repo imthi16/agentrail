@@ -125,6 +125,18 @@ class WorkflowRunner:
         )
 
         for stage in topological_order(workflow.stages):
+            # Skip stages already finished on a prior run so `resume` continues
+            # from where it paused instead of re-doing completed work.
+            if not dry_run and stage.status is StageStatus.COMPLETED:
+                self._log.emit(
+                    type="stage.skipped",
+                    workflow_id=workflow.workflow_id,
+                    trace_id=trace,
+                    stage_id=stage.id,
+                    mode=self.mode,
+                    attributes={"reason": "already completed"},
+                )
+                continue
             try:
                 report.stages.append(self._run_stage(workflow, stage, trace, dry_run))
             except StageBlockedError:
@@ -237,9 +249,26 @@ class WorkflowRunner:
             stage.status = StageStatus.BLOCKED
             raise StageBlockedError(f"stage {stage.id!r} blocked: {exc}") from exc
 
-        # Harness runs under the policies gate (enforced above; the gate object
-        # is handed to the adapter transport when live I/O lands in v0.3).
-        _ = gate
+        # Authorize the harness launch through the policy gate (invariant #1).
+        # A mutating harness is an EDIT against the worktree; plan mode denies,
+        # manual asks, accept_edits/auto allow (auto bounded by the Intent Lock).
+        auth = gate.authorize_session(argv)
+        if not auth.performed:
+            self._checkpoints.rollback(stage.id, Path(worktree.path), checkpoint_id)
+            stage.status = StageStatus.BLOCKED
+            self._log.emit(
+                type="stage.blocked",
+                workflow_id=workflow.workflow_id,
+                trace_id=trace,
+                span_id=span,
+                stage_id=stage.id,
+                mode=self.mode,
+                attributes={"reason": f"session not authorized: {auth.reason}"},
+            )
+            raise StageBlockedError(
+                f"stage {stage.id!r} blocked: harness launch denied ({auth.reason})"
+            )
+
         handle = self.adapter.start(
             prompt,
             mode=self.mode,
@@ -247,6 +276,21 @@ class WorkflowRunner:
             cwd=Path(worktree.path),
             dry_run=False,
         )
+        if not handle.started:
+            # Harness missing or exited nonzero: do not mark the stage complete.
+            stage.status = StageStatus.FAILED
+            self._log.emit(
+                type="stage.failed",
+                workflow_id=workflow.workflow_id,
+                trace_id=trace,
+                span_id=span,
+                stage_id=stage.id,
+                mode=self.mode,
+                attributes={"reason": "harness did not start", "argv": argv},
+            )
+            raise StageBlockedError(
+                f"stage {stage.id!r} failed: harness did not start ({argv[0]!r})"
+            )
 
         # Post-edit Semantic Edit Guard (blast-radius check). If any check fails,
         # auto-revert the worktree to the checkpoint and block the stage.
@@ -266,6 +310,10 @@ class WorkflowRunner:
                 )
                 raise StageBlockedError(f"stage {stage.id!r} blocked by edit guard: {message}")
 
+        # Commit the stage's worktree changes so they land in the PR, and push
+        # the branch when a remote is available (verified git/gh commands).
+        committed = self._commit_stage(stage, Path(worktree.path))
+
         pr_ref = self._prs.create_for_stage(stage, workflow, dry_run=not self._prs_ready())
         stage.pull_request = pr_ref
         stage.status = StageStatus.COMPLETED
@@ -282,6 +330,7 @@ class WorkflowRunner:
                 "pr_base": pr_ref.base,
                 "pr_head": pr_ref.head,
                 "harness_started": handle.started,
+                "committed": committed,
             },
         )
         return StagePlan(
@@ -315,6 +364,35 @@ class WorkflowRunner:
         if not GitRepo(self.root).has_remote():
             return False
         return gh_authenticated(cwd=self.root)
+
+    def _commit_stage(self, stage: Stage, worktree_root: Path) -> bool:
+        """Commit the worktree's changes so they appear in the stage PR.
+
+        Pushes ``stage/<id>`` when a remote exists (required before
+        ``gh pr create``). Returns True if a commit was made. A clean worktree
+        (harness made no edits) commits nothing and returns False.
+        """
+
+        from agentrail.git import GitError, GitRepo
+
+        repo = GitRepo(worktree_root)
+        try:
+            if not repo.is_dirty():
+                return False
+            repo.stage_all()
+            repo.commit(f"[AgentRail] {stage.title}")
+            if repo.has_remote():
+                repo.push(f"stage/{stage.id}")
+            return True
+        except GitError as exc:
+            self._log.emit(
+                type="stage.commit_failed",
+                workflow_id="-",
+                trace_id=new_id(),
+                stage_id=stage.id,
+                attributes={"error": str(exc)},
+            )
+            return False
 
     def _load_stage_lock(self, stage: Stage) -> IntentLock | None:
         if stage.intent_lock_hash is None:

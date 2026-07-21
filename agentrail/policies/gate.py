@@ -196,6 +196,56 @@ class PolicyGate:
             performed=True,
         )
 
+    def authorize_session(self, argv: list[str]) -> GateOutcome:
+        """Authorize launching a (potentially mutating) harness session.
+
+        This is a mode-level gate on *whether the harness may run at all* in the
+        worktree; per-action path/shell scoping is enforced by ``run_shell`` /
+        ``write_file`` (and, in auto, the Intent Lock) once live I/O lands.
+        ``plan`` denies (read-only), ``manual`` asks, ``accept_edits``/``auto``
+        allow. Auto additionally requires a verified Intent Lock. A tampered
+        lock hash fails closed via ``_evaluate``'s hash check.
+        """
+
+        action = Action(type=ActionType.SHELL, command=" ".join(argv) or "<harness>")
+        # Hash-tamper check first (fails closed regardless of mode).
+        if self._lock is not None and self._recorded_hash is not None:
+            if not verify_lock_hash(self._lock, self._recorded_hash):
+                result = PolicyResult(Decision.DENY, "Intent Lock hash mismatch (tampered)")
+            else:
+                result = self._session_decision()
+        else:
+            result = self._session_decision()
+        approved = self._resolve_approval(action, result)
+        self._log.emit(
+            type="policy.session_authorized",
+            workflow_id=self._workflow_id,
+            trace_id=self._trace_id,
+            stage_id=self._stage_id,
+            mode=self._mode,
+            attributes={
+                "argv": argv,
+                "decision": result.decision.value,
+                "rule": result.reason,
+                "approved": approved,
+            },
+        )
+        return GateOutcome(
+            action=action,
+            decision=result.decision,
+            reason=result.reason,
+            performed=approved,
+        )
+
+    def _session_decision(self) -> PolicyResult:
+        if self._mode is Mode.PLAN:
+            return PolicyResult(Decision.DENY, "plan mode is read-only")
+        if self._mode is Mode.MANUAL:
+            return PolicyResult(Decision.ASK, "manual mode gates the harness session")
+        if self._mode is Mode.AUTO and self._lock is None:
+            return PolicyResult(Decision.DENY, "auto mode requires an Intent Lock")
+        return PolicyResult(Decision.ALLOW, f"{self._mode.value} mode permits the session")
+
     def _resolve_approval(self, action: Action, result: PolicyResult) -> bool:
         if result.decision is Decision.ALLOW:
             return True
