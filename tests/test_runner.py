@@ -183,3 +183,37 @@ def test_tampered_lock_blocks_stage(temp_git_repo: Path) -> None:
     runner = WorkflowRunner(temp_git_repo, adapter=FakeAdapter())  # type: ignore[arg-type]
     with pytest.raises(StageBlockedError):
         runner.run(workflow, dry_run=False)
+
+
+def test_run_emits_model_calls_with_routed_tiers(temp_git_repo: Path) -> None:
+    init_config(temp_git_repo)
+    workflow = plan_workflow("Add a healthcheck endpoint")  # analyse -> implement
+    workflow.status = WorkflowStatus.APPROVED
+    save_workflow(temp_git_repo, workflow)
+
+    WorkflowRunner(temp_git_repo, adapter=FakeAdapter()).run(workflow)  # type: ignore[arg-type]
+
+    calls = [e for e in EventLog(temp_git_repo).read() if e.type == "model.call"]
+    by_stage = {e.stage_id: e.attributes for e in calls}
+    # analyse routes Deep; implement routes Balanced (auto-downgrade policy).
+    assert by_stage["analyse"]["tier"] == "deep"
+    assert by_stage["implement"]["tier"] == "balanced"
+    assert by_stage["analyse"]["model_id"] == "claude-opus-4-8"
+
+
+def test_run_blocks_when_budget_exceeded(temp_git_repo: Path) -> None:
+    from agentrail.config import Budget, Config, write_config
+    from agentrail.runner import StageBlockedError
+
+    # A microscopic token budget guarantees the first stage's call is refused.
+    write_config(temp_git_repo, Config(budget=Budget(max_tokens=1)))
+    workflow = plan_workflow("Add a healthcheck endpoint")
+    workflow.status = WorkflowStatus.APPROVED
+    save_workflow(temp_git_repo, workflow)
+
+    runner = WorkflowRunner(temp_git_repo, adapter=FakeAdapter())  # type: ignore[arg-type]
+    with pytest.raises(StageBlockedError):
+        runner.run(workflow)
+
+    types = [e.type for e in EventLog(temp_git_repo).read()]
+    assert "budget.exceeded" in types

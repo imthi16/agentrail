@@ -95,7 +95,7 @@ class BudgetTracker:
     def record_call(
         self,
         *,
-        provider: Provider,
+        provider: Provider | str,
         model_id: str,
         tier: Tier,
         input_tokens: int,
@@ -111,6 +111,7 @@ class BudgetTracker:
 
         cost = estimate_cost(model_id, input_tokens, output_tokens, self.prices)
         tokens = input_tokens + output_tokens
+        provider_name = str(provider)
 
         if self.would_exceed(cost, tokens):
             self.event_log.emit(
@@ -119,7 +120,7 @@ class BudgetTracker:
                 trace_id=self._trace_id,
                 stage_id=stage_id,
                 attributes={
-                    "provider": provider.value,
+                    "provider": provider_name,
                     "model_id": model_id,
                     "tier": tier.value,
                     "attempted_usd": round(cost, 6),
@@ -143,7 +144,7 @@ class BudgetTracker:
             trace_id=self._trace_id,
             stage_id=stage_id,
             attributes={
-                "provider": provider.value,
+                "provider": provider_name,
                 "model_id": model_id,
                 "tier": tier.value,
                 "input_tokens": input_tokens,

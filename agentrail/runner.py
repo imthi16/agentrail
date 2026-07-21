@@ -22,6 +22,13 @@ from agentrail.events import EventLog, new_id
 from agentrail.git import PullRequestManager
 from agentrail.models import IntentLock, Mode, Stage, StageStatus, Workflow, WorkflowStatus
 from agentrail.policies import PolicyGate, read_lock, verify_stage_lock
+from agentrail.profiles import (
+    BudgetExceededError,
+    BudgetTracker,
+    ModelRouter,
+    Provider,
+    WorkKind,
+)
 from agentrail.tmux import tmux_available
 from agentrail.workflow import save_workflow, topological_order
 from agentrail.workspaces import WorktreeManager
@@ -63,6 +70,7 @@ class WorkflowRunner:
     mode: Mode = Mode.ACCEPT_EDITS
     default_base: str = "main"
     adapter: HarnessAdapter = field(default_factory=JcodeAdapter)
+    provider: Provider = Provider.ANTHROPIC
 
     def __post_init__(self) -> None:
         self._log = EventLog(self.root)
@@ -70,6 +78,8 @@ class WorkflowRunner:
         self._checkpoints = CheckpointStore(self.root)
         self._prs = PullRequestManager(self.root, default_base=self.default_base)
         self._budget = self._load_budget()
+        self._router: ModelRouter | None = None
+        self._tracker: BudgetTracker | None = None
 
     def _load_budget(self) -> Budget:
         try:
@@ -88,6 +98,18 @@ class WorkflowRunner:
         trace = new_id()
         report = RunReport(workflow_id=workflow.workflow_id, dry_run=dry_run)
         workflow.status = WorkflowStatus.RUNNING
+        self._router = ModelRouter(
+            provider=self.provider,
+            event_log=self._log,
+            workflow_id=workflow.workflow_id,
+            trace_id=trace,
+        )
+        self._tracker = BudgetTracker(
+            budget=self._budget,
+            event_log=self._log,
+            workflow_id=workflow.workflow_id,
+            trace_id=trace,
+        )
         self._log.emit(
             type="workflow.run_started",
             workflow_id=workflow.workflow_id,
@@ -196,11 +218,33 @@ class WorkflowRunner:
             )
             raise StageBlockedError(f"stage {stage.id!r} blocked: {admit_reason}")
 
+        # Route the model tier for this stage (Deep for analysis/planning,
+        # Balanced for implementation) and record the estimated spend against
+        # the budget. Over-budget fails closed as a blocked stage.
+        assert self._router is not None and self._tracker is not None
+        profile = self._router.route(self._work_kind(stage), stage_id=stage.id)
+        try:
+            self._tracker.record_call(
+                provider=profile.provider,
+                model_id=profile.model_id,
+                tier=profile.tier,
+                input_tokens=self._estimate_prompt_tokens(prompt),
+                output_tokens=0,
+                stage_id=stage.id,
+            )
+        except BudgetExceededError as exc:
+            stage.status = StageStatus.BLOCKED
+            raise StageBlockedError(f"stage {stage.id!r} blocked: {exc}") from exc
+
         # Harness runs under the policies gate (enforced above; the gate object
         # is handed to the adapter transport when live I/O lands in v0.3).
         _ = gate
         handle = self.adapter.start(
-            prompt, mode=self.mode, model_id=None, cwd=Path(worktree.path), dry_run=False
+            prompt,
+            mode=self.mode,
+            model_id=profile.model_id,
+            cwd=Path(worktree.path),
+            dry_run=False,
         )
 
         pr_ref = self._prs.create_for_stage(stage, workflow, dry_run=not self._prs_ready())
@@ -278,10 +322,25 @@ class WorkflowRunner:
             trace_id=trace,
         )
 
+    @staticmethod
+    def _work_kind(stage: Stage) -> WorkKind:
+        """Map a stage to a work kind for tier routing (heuristic)."""
+
+        text = f"{stage.id} {stage.title}".lower()
+        if any(k in text for k in ("analyse", "analyze", "design", "architect", "plan")):
+            return WorkKind.PLANNING
+        return WorkKind.IMPLEMENTATION
+
+    @staticmethod
+    def _estimate_prompt_tokens(prompt: str) -> int:
+        """Very rough token estimate (~4 chars/token) for budget accounting."""
+
+        return max(1, len(prompt) // 4)
+
     def _admit(self, stage: Stage, *, worktree_root: Path) -> tuple[bool, str]:
         """Decide whether a stage may run under the current mode + Intent Lock.
 
-        Fails closed: `auto` requires a verified Intent Lock, and any recorded
+        Fails closed: ``auto`` requires a verified Intent Lock, and any recorded
         lock hash must still match the on-disk lock.
         """
 
