@@ -16,7 +16,8 @@ from agentrail import __version__
 from agentrail.checkpoints import CheckpointError, CheckpointStore
 from agentrail.config import config_path, init_config, load_config
 from agentrail.events import EventLog, new_id
-from agentrail.models import Stage
+from agentrail.models import Stage, Workflow, WorkflowStatus
+from agentrail.runner import WorkflowRunner
 from agentrail.workflow import (
     WorkflowValidationError,
     load_workflow,
@@ -179,6 +180,112 @@ def _render_stages(stages: list[Stage]) -> None:
             stage.status.value,
         )
     console.print(table)
+
+
+@app.command()
+def approve() -> None:
+    """Approve the current workflow so it can be run."""
+
+    root = _root()
+    workflow = _load_or_exit(root)
+    if workflow.status not in (WorkflowStatus.AWAITING_APPROVAL, WorkflowStatus.PAUSED):
+        console.print(f"[yellow]Nothing to approve (status={workflow.status.value}).[/yellow]")
+        raise typer.Exit(code=0)
+    workflow.status = WorkflowStatus.APPROVED
+    save_workflow(root, workflow)
+    EventLog(root).emit(
+        type="workflow.approved",
+        workflow_id=workflow.workflow_id,
+        trace_id=new_id(),
+        mode=workflow.mode,
+    )
+    console.print("[green]Approved.[/green] Run with `agentrail run` (or --dry-run).")
+
+
+@app.command()
+def run(
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Plan the full stage sequence without side effects."
+    ),
+) -> None:
+    """Execute the approved workflow stage-by-stage (worktree, checkpoint, PR)."""
+
+    root = _root()
+    workflow = _load_or_exit(root)
+    if dry_run and workflow.status == WorkflowStatus.AWAITING_APPROVAL:
+        workflow.status = WorkflowStatus.APPROVED  # dry-run needs no real approval
+    if workflow.status not in (WorkflowStatus.APPROVED, WorkflowStatus.RUNNING):
+        console.print(
+            f"[red]Workflow not approved[/red] (status={workflow.status.value}). "
+            "Run `agentrail approve` first."
+        )
+        raise typer.Exit(code=1)
+
+    runner = WorkflowRunner(root, mode=workflow.mode)
+    report = runner.run(workflow, dry_run=dry_run)
+
+    label = "DRY-RUN plan" if dry_run else "Executed"
+    console.print(f"[green]{label}[/green] for {len(report.stages)} stage(s):")
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("stage")
+    table.add_column("worktree branch")
+    table.add_column("base")
+    table.add_column("PR base -> head")
+    table.add_column("tmux")
+    for plan in report.stages:
+        table.add_row(
+            plan.stage_id,
+            plan.worktree_branch,
+            plan.worktree_base,
+            f"{plan.pr_base} -> {plan.pr_head}",
+            "yes" if plan.ran_in_tmux else "no",
+        )
+    console.print(table)
+
+
+@app.command()
+def pause() -> None:
+    """Pause a running workflow."""
+
+    root = _root()
+    workflow = _load_or_exit(root)
+    workflow.status = WorkflowStatus.PAUSED
+    save_workflow(root, workflow)
+    EventLog(root).emit(
+        type="workflow.paused",
+        workflow_id=workflow.workflow_id,
+        trace_id=new_id(),
+        mode=workflow.mode,
+    )
+    console.print("[yellow]Paused.[/yellow] Resume with `agentrail resume`.")
+
+
+@app.command()
+def resume() -> None:
+    """Resume a paused workflow (marks it approved so it can run again)."""
+
+    root = _root()
+    workflow = _load_or_exit(root)
+    if workflow.status is not WorkflowStatus.PAUSED:
+        console.print(f"[yellow]Not paused (status={workflow.status.value}).[/yellow]")
+        raise typer.Exit(code=0)
+    workflow.status = WorkflowStatus.APPROVED
+    save_workflow(root, workflow)
+    EventLog(root).emit(
+        type="workflow.resumed",
+        workflow_id=workflow.workflow_id,
+        trace_id=new_id(),
+        mode=workflow.mode,
+    )
+    console.print("[green]Resumed.[/green] Continue with `agentrail run`.")
+
+
+def _load_or_exit(root: Path) -> Workflow:
+    try:
+        return load_workflow(root)
+    except FileNotFoundError:
+        console.print("[yellow]No workflow yet.[/yellow] Run `agentrail plan \"<goal>\"`.")
+        raise typer.Exit(code=1) from None
 
 
 def main() -> None:
