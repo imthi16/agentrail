@@ -64,6 +64,24 @@ class _Base(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class WorktreeRef(_Base):
+    """Where a stage's isolated git worktree lives (workspaces spec)."""
+
+    path: str
+    branch: str
+    base: str
+
+
+class PullRequestRef(_Base):
+    """A stage's draft PR coordinates (git spec). ``number`` is None until opened."""
+
+    number: int | None = None
+    base: str
+    head: str
+    url: str | None = None
+    draft: bool = True
+
+
 class Stage(_Base):
     """A single unit of work in the DAG. One stage = one worktree = one branch."""
 
@@ -74,6 +92,9 @@ class Stage(_Base):
     acceptance_criteria: list[str] = Field(default_factory=list)
     status: StageStatus = StageStatus.PENDING
     intent_lock_hash: str | None = None
+    worktree: WorktreeRef | None = None
+    pull_request: PullRequestRef | None = None
+    checkpoints: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _no_self_dependency(self) -> Stage:
