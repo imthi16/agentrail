@@ -49,7 +49,7 @@ agentrail resume
 agentrail rollback <stage-id>
 ```
 
-The current scaffold implements `version`, `init`, `plan`, and `status`.
+The current scaffold implements `version`, `init`, `plan`, `status`, `approve`, `run` (with `--dry-run`), `pause`, `resume`, and `rollback`.
 
 ## Installation
 
@@ -119,26 +119,26 @@ events/             JSONL timeline and replay
 - [x] Python package and CLI scaffold
 - [x] Project initialization
 - [x] Basic workflow generation
-- [ ] Approval-driven Plan/Edit/Auto modes
-- [ ] Intent Lock scope contract
-- [ ] Stage DAG validation
-- [ ] Git worktree manager
-- [ ] tmux supervisor
-- [ ] Checkpoint and rollback
-- [ ] Separate draft PR creation
+- [x] Approval-driven Plan/Edit/Auto modes
+- [x] Intent Lock scope contract
+- [x] Stage DAG validation
+- [x] Git worktree manager
+- [x] tmux supervisor
+- [x] Checkpoint and rollback
+- [x] Separate draft PR creation (stacked, with dry-run)
 
 ### v0.2
 
-- [ ] jcode adapter
-- [ ] LSP diagnostics and read-before-edit guard
-- [ ] Model/provider/reasoning profile picker
+- [x] jcode adapter
+- [x] Read-before-edit guard (LSP diagnostics: hook injected, live wiring v0.3)
+- [x] Model/provider/reasoning profile picker
 - [ ] Cost and retry budgets
 - [ ] GitHub CI and merge gates
-- [ ] Structured execution timeline
+- [x] Structured execution timeline (JSONL events)
 
 ### v0.3
 
-- [ ] Claude Code, Codex, and Gemini adapters
+- [~] Claude Code, Codex, and Gemini adapters (interface + argv stubs done)
 - [ ] React dashboard
 - [ ] Remote execution
 - [ ] Full workflow replay
