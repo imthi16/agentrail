@@ -25,6 +25,29 @@ OpenAI / Codex:
 - `reasoning_effort`: GPT-5 = minimal/low/medium/high; GPT-5.6 = none/low/medium/
   high/xhigh/max (default medium). Models: `gpt-5.6-sol` (Deep),
   `gpt-5.6-terra` (Balanced), `gpt-5.6-luna` (Fast).
+- Gotcha (measured): Sol's tool-call success is ~91% vs Terra's ~97% — harness
+  loops favor Terra; Luna's long-context recall falls off a cliff (~41% MRCR),
+  never bind review to Luna.
+
+z.ai (verified docs.z.ai + z.ai/blog, Aug 2026):
+- Deep → `glm-5.3` (open-weights #1 coding: TerminalBench 88.2, CyberGym #1;
+  ~30–50% fewer output tokens than 5.2). Thinking mandatory; Low/High/Max.
+- Balanced → `glm-5.2` (MIT open weights, 1M ctx).
+- Fast → `glm-5.3-flash` ($0.07/$0.25 per 1M — the cheapest frontier-grade fast).
+
+OpenCode Go/Zen (verified opencode.ai/docs/zen catalog, Aug–Sep 2026):
+- Deep → `kimi-k3` (repo-scale coding, 1M ctx); Balanced → `qwen3.8-max`;
+  Fast → `qwen3.8-flash`. NEVER pin deprecated IDs (`kimi-k2.x`, `glm-5.1`).
+- Endpoint is OpenAI-compatible `/chat/completions` over
+  `https://opencode.ai/go/v1` (default) or `https://opencode.ai/zen/v1`; key
+  arrives via the env var named in `config.opencode.api_key_env`, never in YAML.
+
+## Role layer (on top of provider+tier)
+The pipeline is role-driven for the solo developer: `plan`, `research`, `code`,
+`review` — each binds to `(provider, tier)` via `config.roles` (`RoleBind`).
+`ModelRouter.route_role` resolves and logs a `profile.tier_changed` event with a
+`role` attribute; unbound roles fall back to work-kind routing. VERIFY and
+MARKET slot into the same table later with no schema change.
 
 ## Config-driven mapping (single source of truth)
 Store tiers in config (e.g. `.agentrail/config.yaml` or a bundled default) as

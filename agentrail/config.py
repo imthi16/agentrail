@@ -11,7 +11,7 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
-from agentrail.models import Mode
+from agentrail.models import Mode, Provider, Role, Tier
 
 AGENTRAIL_DIR = ".agentrail"
 CONFIG_FILENAME = "config.yaml"
@@ -32,6 +32,33 @@ class Budget(BaseModel):
     max_retries_per_stage: int = Field(default=2, ge=0)
 
 
+class RoleBind(BaseModel):
+    """One role -> (provider, tier). Validated on load so bad YAML fails loudly."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Provider
+    tier: Tier
+
+
+class OpencodeSettings(BaseModel):
+    """OpenCode Go/Zen connectivity. Keys come from env, never from YAML."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    base_url: str = "https://opencode.ai/go/v1"
+    api_key_env: str = "OPENCODE_API_KEY"
+
+
+# Mixed defaults for the solo-developer pipeline (profiles/registry Role).
+DEFAULT_ROLES: dict[Role, RoleBind] = {
+    Role.PLAN: RoleBind(provider=Provider.ANTHROPIC, tier=Tier.DEEP),
+    Role.RESEARCH: RoleBind(provider=Provider.OPENCODE, tier=Tier.DEEP),
+    Role.CODE: RoleBind(provider=Provider.ZAI, tier=Tier.DEEP),
+    Role.REVIEW: RoleBind(provider=Provider.OPENAI, tier=Tier.DEEP),
+}
+
+
 class Config(BaseModel):
     """Project configuration persisted to ``.agentrail/config.yaml``."""
 
@@ -41,6 +68,8 @@ class Config(BaseModel):
     default_profile: str = "balanced"
     harness: str = "jcode"
     budget: Budget = Field(default_factory=Budget)
+    roles: dict[Role, RoleBind] = Field(default_factory=lambda: dict(DEFAULT_ROLES))
+    opencode: OpencodeSettings = Field(default_factory=OpencodeSettings)
 
 
 def config_dir(root: Path) -> Path:

@@ -19,6 +19,7 @@ dependencies = [
     "pydantic>=2.7",
     "libtmux>=0.58,<0.61",  # pre-1.0: pin narrow, re-verify object model on upgrade
     "GitPython>=3.1",
+    "httpx>=0.27",  # OpenCode Go/Zen API adapter (opencode.py); mock in tests
 ]
 
 [project.optional-dependencies]
