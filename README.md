@@ -51,6 +51,7 @@ request as one long, unbounded session. AgentRail puts the work on rails:
 | The agent can touch anything | **Intent Lock** bounds files + commands |
 | A bad run corrupts your checkout | **Isolated worktrees** + checkpoints |
 | "What did it actually do?" | **Append-only JSONL timeline** you can replay |
+| One model does everything | **Per-role routing**: plan → Opus, code → GLM-5.3, review → GPT-5.6 Sol |
 | Long processes die with the tool | **tmux supervision** that survives crashes |
 
 ---
@@ -94,6 +95,8 @@ flowchart LR
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
+export OPENCODE_API_KEY=...                                 # only for OpenCode-bound roles
+
 agentrail init                                              # create .agentrail/
 agentrail plan "Implement login and logout as separate PRs" # build the stage DAG
 agentrail approve                                           # unlock execution
@@ -101,7 +104,8 @@ agentrail run --dry-run                                     # preview worktrees 
 ```
 
 This writes `.agentrail/config.yaml` and `.agentrail/workflow.yaml`. All runtime state lives
-under `.agentrail/` and is gitignored.
+under `.agentrail/` and is gitignored. `config.yaml` carries the `roles:` routing table and
+the `opencode:` endpoint (`go` by default — flip `base_url` to Zen if that's your plan).
 
 ---
 
@@ -137,17 +141,27 @@ with SHA-256 and pinned to the stage; a tampered lock is detected and rejected.
 
 ---
 
-## 🧠 Model profiles
+## 🧠 Role-based model routing
 
-The picker is two steps — pick a **provider**, then an **effort tier**. Volatile model IDs
-live in one config table, never hardcoded in code paths. Planning routes to *Deep*,
-implementation to *Balanced*, lint/format to *Fast*, with auto-downgrade logged to the timeline.
+The picker is two steps — pick a **provider**, then an **effort tier**. On top of that sits a
+**roles table**: each stage's role (`plan`, `research`, `code`, `review`) binds to a
+`(provider, tier)` in `.agentrail/config.yaml`, so different LLMs handle different parts of
+the solo-developer pipeline. Volatile model IDs live in that one config table, never
+hardcoded in code paths; every tier change is logged to the timeline.
 
-| Tier | Anthropic | Google | OpenAI |
-| :--- | :--- | :--- | :--- |
-| **Deep** | `claude-opus-4-8` | `gemini-3.1-pro-preview` | `gpt-5.6-sol` |
-| **Balanced** | `claude-sonnet-4-6` | `gemini-3.5-flash` | `gpt-5.6-terra` |
-| **Fast** | `claude-haiku-4-5-20251001` | `gemini-3.1-flash-lite` | `gpt-5.6-luna` |
+| Role | Anthropic | Google | OpenAI | z.ai | OpenCode |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **plan** | `claude-opus-4-8` | `gemini-3.1-pro-preview` | `gpt-5.6-sol` | `glm-5.3` | `kimi-k3` |
+| **research** | — | — | — | `glm-5.2` | `kimi-k3` (1M ctx) |
+| **code** (default) | — | — | — | `glm-5.3` | — |
+| **review** (default) | — | — | `gpt-5.6-sol` | — | — |
+| **lint/format fallback** | `claude-haiku-4-5-20251001` | `gemini-3.1-flash-lite` | `gpt-5.6-luna` | `glm-5.3-flash` | `qwen3.8-flash` |
+
+Defaults map each **plan** stage to `anthropic/deep`, **code** to `zai/deep`, and **review**
+to `openai/deep`; override any role with `roles:` in `.agentrail/config.yaml`. OpenCode
+runs over the **Go** or **Zen** endpoints — set `opencode.base_url` accordingly and put your
+key in `OPENCODE_API_KEY` (never in YAML). Model IDs verified against z.ai docs and the
+OpenCode Zen catalog (Aug–Sep 2026); re-verify before re-pinning, per `profiles/CLAUDE.md`.
 
 ---
 
@@ -186,7 +200,7 @@ agentrail/
 ├── tmux/            # libtmux session + pane supervision
 ├── git/             # branches, commits, stacked draft PRs
 ├── profiles/        # provider/tier picker, model router, budgets
-├── adapters/        # jcode (default) + Claude Code / Codex / Gemini
+├── adapters/        # jcode (default) + OpenCode API (Go/Zen) + Claude Code / Codex / Gemini
 └── events/          # append-only JSONL timeline + replay
 ```
 
@@ -224,8 +238,9 @@ agentrail/
 </td></tr>
 </table>
 
-**v0.3 (in progress)** — live Claude Code / Codex / Gemini session I/O · React dashboard ·
-remote execution · full workflow replay · runtime debugging.
+**v0.3 (in progress)** — role-based multi-LLM routing (plan / research / code / review) ·
+z.ai + OpenCode Go/Zen provider · live Claude Code / Codex / Gemini session I/O ·
+React dashboard · remote execution · full workflow replay · runtime debugging.
 
 ---
 
