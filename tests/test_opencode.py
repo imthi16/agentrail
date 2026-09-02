@@ -88,9 +88,7 @@ def test_start_missing_model_id_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("OPENCODE_API_KEY", "sk-test")
-    handle = _adapter().start(
-        "prompt", mode=Mode.ACCEPT_EDITS, model_id=None, cwd=tmp_path
-    )
+    handle = _adapter().start("prompt", mode=Mode.ACCEPT_EDITS, model_id=None, cwd=tmp_path)
     assert not handle.started
     assert handle.output == "no routed model_id"
 
