@@ -195,10 +195,13 @@ def test_run_emits_model_calls_with_routed_tiers(temp_git_repo: Path) -> None:
 
     calls = [e for e in EventLog(temp_git_repo).read() if e.type == "model.call"]
     by_stage = {e.stage_id: e.attributes for e in calls}
-    # analyse routes Deep; implement routes Balanced (auto-downgrade policy).
+    # Role defaults (config.roles): analyse->plan->anthropic/deep,
+    # implement->code->zai/deep.
     assert by_stage["analyse"]["tier"] == "deep"
-    assert by_stage["implement"]["tier"] == "balanced"
+    assert by_stage["analyse"]["provider"] == "anthropic"
     assert by_stage["analyse"]["model_id"] == "claude-opus-4-8"
+    assert by_stage["implement"]["provider"] == "zai"
+    assert by_stage["implement"]["model_id"] == "glm-5.3"
 
 
 def test_run_blocks_when_budget_exceeded(temp_git_repo: Path) -> None:

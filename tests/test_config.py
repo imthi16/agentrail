@@ -8,7 +8,14 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from agentrail.config import Budget, Config, init_config, load_config, write_config
+from agentrail.config import (
+    Budget,
+    Config,
+    RoleBind,
+    init_config,
+    load_config,
+    write_config,
+)
 from agentrail.models import Mode
 
 
@@ -48,3 +55,40 @@ def test_unknown_field_is_rejected(project_root: Path) -> None:
 def test_negative_budget_is_rejected() -> None:
     with pytest.raises(ValidationError):
         Budget(max_usd=-1.0)
+
+
+def test_roles_default_to_mixed_pipeline() -> None:
+    from agentrail.models import Provider, Role, Tier
+
+    cfg = Config()
+    assert cfg.roles[Role.PLAN] == RoleBind(provider=Provider.ANTHROPIC, tier=Tier.DEEP)
+    assert cfg.roles[Role.CODE] == RoleBind(provider=Provider.ZAI, tier=Tier.DEEP)
+    assert cfg.roles[Role.REVIEW] == RoleBind(provider=Provider.OPENAI, tier=Tier.DEEP)
+    assert cfg.roles[Role.RESEARCH] == RoleBind(provider=Provider.OPENCODE, tier=Tier.DEEP)
+
+
+def test_opencode_defaults_to_go_endpoint() -> None:
+    cfg = Config()
+    assert cfg.opencode.base_url == "https://opencode.ai/go/v1"
+    assert cfg.opencode.api_key_env == "OPENCODE_API_KEY"
+
+
+def test_roles_round_trip_through_yaml(project_root: Path) -> None:
+    from agentrail.models import Provider, Role, Tier
+
+    cfg = Config(roles={Role.CODE: RoleBind(provider=Provider.OPENCODE, tier=Tier.BALANCED)})
+    write_config(project_root, cfg)
+    reloaded = load_config(project_root)
+    assert reloaded.roles[Role.CODE].provider is Provider.OPENCODE
+    assert reloaded.roles[Role.CODE].tier is Tier.BALANCED
+
+
+def test_bad_role_provider_string_raises(project_root: Path) -> None:
+    path = project_root / ".agentrail" / "config.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump({"roles": {"code": {"provider": "not-a-provider", "tier": "deep"}}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValidationError):
+        load_config(project_root)

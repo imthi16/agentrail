@@ -54,6 +54,30 @@ class Tier(StrEnum):
     FAST = "fast"
 
 
+class Provider(StrEnum):
+    """Model family / provider (step one of the picker). Kept in models.py because
+    config.py + profiles/ both need it without a circular import."""
+
+    ANTHROPIC = "anthropic"
+    GOOGLE = "google"
+    OPENAI = "openai"
+    ZAI = "zai"
+    OPENCODE = "opencode"
+
+
+class Role(StrEnum):
+    """Named pipeline roles bound to (provider, tier) via config.roles.
+
+    plan/research/code/review realize the solo-developer pipeline. VERIFY and
+    MARKET slot into the same table later without a schema change.
+    """
+
+    PLAN = "plan"
+    RESEARCH = "research"
+    CODE = "code"
+    REVIEW = "review"
+
+
 def _utcnow() -> datetime:
     return datetime.now(UTC)
 
@@ -110,7 +134,7 @@ class Profile(_Base):
     """
 
     name: str
-    provider: str
+    provider: Provider
     tier: Tier
     model_id: str
     thinking_param: str | None = None

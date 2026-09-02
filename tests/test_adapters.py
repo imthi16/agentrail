@@ -24,7 +24,7 @@ def test_default_adapter_is_jcode() -> None:
 
 
 def test_all_adapters_registered() -> None:
-    assert set(adapter_names()) == {"jcode", "claude-code", "codex", "gemini"}
+    assert set(adapter_names()) == {"jcode", "opencode", "claude-code", "codex", "gemini"}
 
 
 def test_unknown_adapter_raises() -> None:

@@ -15,18 +15,32 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agentrail.adapters import HarnessAdapter, JcodeAdapter
+from agentrail.adapters import (
+    HarnessAdapter,
+    JcodeAdapter,
+    OpencodeApiAdapter,
+)
 from agentrail.checkpoints import CheckpointStore, SemanticEditGuard
-from agentrail.config import Budget, load_config
+from agentrail.config import Config, load_config
 from agentrail.events import EventLog, new_id
 from agentrail.git import PullRequestManager
-from agentrail.models import IntentLock, Mode, Stage, StageStatus, Workflow, WorkflowStatus
+from agentrail.models import (
+    IntentLock,
+    Mode,
+    Profile,
+    Role,
+    Stage,
+    StageStatus,
+    Workflow,
+    WorkflowStatus,
+)
 from agentrail.policies import PolicyGate, read_lock, verify_stage_lock
 from agentrail.profiles import (
     BudgetExceededError,
     BudgetTracker,
     ModelRouter,
     Provider,
+    RoleBindSpec,
     WorkKind,
 )
 from agentrail.tmux import tmux_available
@@ -78,15 +92,27 @@ class WorkflowRunner:
         self._worktrees = WorktreeManager(self.root)
         self._checkpoints = CheckpointStore(self.root)
         self._prs = PullRequestManager(self.root, default_base=self.default_base)
-        self._budget = self._load_budget()
+        self._config = self._load_config()
+        self._budget = self._config.budget
         self._router: ModelRouter | None = None
         self._tracker: BudgetTracker | None = None
 
-    def _load_budget(self) -> Budget:
+    def _load_config(self) -> Config:
         try:
-            return load_config(self.root).budget
+            return load_config(self.root)
         except (FileNotFoundError, ValueError):
-            return Budget()
+            return Config()
+
+    def _role_binds(self) -> dict[Role, RoleBindSpec]:
+        return {
+            role: RoleBindSpec(provider=bind.provider, tier=bind.tier)
+            for role, bind in self._config.roles.items()
+        }
+
+    def _adapter_for(self, provider: Provider) -> HarnessAdapter:
+        if provider is Provider.OPENCODE:
+            return OpencodeApiAdapter(settings=self._config.opencode)
+        return self.adapter
 
     def run(self, workflow: Workflow, *, dry_run: bool = False) -> RunReport:
         """Run every stage in dependency order; persist status transitions."""
@@ -104,6 +130,7 @@ class WorkflowRunner:
             event_log=self._log,
             workflow_id=workflow.workflow_id,
             trace_id=trace,
+            role_binds=self._role_binds(),
         )
         self._tracker = BudgetTracker(
             budget=self._budget,
@@ -183,8 +210,12 @@ class WorkflowRunner:
             attributes={"base": base, "dry_run": dry_run},
         )
 
+        role = self._role(stage)
+        profile = self._resolve_role(role, stage)
+        adapter = self._adapter_for(profile.provider)
+
         prompt = f"{stage.title}. {stage.description}".strip()
-        argv = self.adapter.build_argv(prompt, mode=self.mode, model_id=None)
+        argv = adapter.build_argv(prompt, mode=self.mode, model_id=profile.model_id)
         use_tmux = tmux_available()
         checkpoint_id: str | None = None
         pr_head = f"stage/{stage.id}"
@@ -231,11 +262,10 @@ class WorkflowRunner:
             )
             raise StageBlockedError(f"stage {stage.id!r} blocked: {admit_reason}")
 
-        # Route the model tier for this stage (Deep for analysis/planning,
-        # Balanced for implementation) and record the estimated spend against
-        # the budget. Over-budget fails closed as a blocked stage.
+        # Route resolved above (unified path: profile + adapter picked up front);
+        # here we only record the estimated spend against the budget. Over-budget
+        # fails closed as a blocked stage.
         assert self._router is not None and self._tracker is not None
-        profile = self._router.route(self._work_kind(stage), stage_id=stage.id)
         try:
             self._tracker.record_call(
                 provider=profile.provider,
@@ -269,7 +299,7 @@ class WorkflowRunner:
                 f"stage {stage.id!r} blocked: harness launch denied ({auth.reason})"
             )
 
-        handle = self.adapter.start(
+        handle = adapter.start(
             prompt,
             mode=self.mode,
             model_id=profile.model_id,
@@ -420,8 +450,26 @@ class WorkflowRunner:
         )
 
     @staticmethod
+    def _role(stage: Stage) -> Role:
+        """Map a stage to a pipeline role for routing (heuristic)."""
+
+        text = f"{stage.id} {stage.title}".lower()
+        if any(k in text for k in ("review", "audit", "verify")):
+            return Role.REVIEW
+        if any(k in text for k in ("research", "discover", "investigate", "explore")):
+            return Role.RESEARCH
+        if any(k in text for k in ("analyse", "analyze", "design", "architect", "plan")):
+            return Role.PLAN
+        return Role.CODE
+
+    def _resolve_role(self, role: Role, stage: Stage) -> Profile:
+        assert self._router is not None
+        return self._router.route_role(role, stage_id=stage.id)
+
+    @staticmethod
     def _work_kind(stage: Stage) -> WorkKind:
-        """Map a stage to a work kind for tier routing (heuristic)."""
+        """Map a stage to a work kind for tier routing (heuristic, kept for
+        callers that don't need roles)."""
 
         text = f"{stage.id} {stage.title}".lower()
         if any(k in text for k in ("analyse", "analyze", "design", "architect", "plan")):

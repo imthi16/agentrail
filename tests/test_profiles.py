@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from agentrail.models import Tier
+from agentrail.models import Role, Tier
 from agentrail.profiles import (
     DEFAULT_REGISTRY,
     ProfileRegistry,
@@ -59,3 +59,19 @@ def test_registry_round_trips_through_config_dict() -> None:
     dumped = DEFAULT_REGISTRY.model_dump(mode="json")
     restored = ProfileRegistry.model_validate(dumped)
     assert restored.resolve(Provider.GOOGLE, Tier.FAST).thinking_param == "MINIMAL"
+
+
+def test_zai_verified_ids() -> None:
+    assert DEFAULT_REGISTRY.resolve(Provider.ZAI, Tier.DEEP).model_id == "glm-5.3"
+    assert DEFAULT_REGISTRY.resolve(Provider.ZAI, Tier.BALANCED).model_id == "glm-5.2"
+    assert DEFAULT_REGISTRY.resolve(Provider.ZAI, Tier.FAST).model_id == "glm-5.3-flash"
+
+
+def test_opencode_verified_ids() -> None:
+    assert DEFAULT_REGISTRY.resolve(Provider.OPENCODE, Tier.DEEP).model_id == "kimi-k3"
+    assert DEFAULT_REGISTRY.resolve(Provider.OPENCODE, Tier.BALANCED).model_id == "qwen3.8-max"
+    assert DEFAULT_REGISTRY.resolve(Provider.OPENCODE, Tier.FAST).model_id == "qwen3.8-flash"
+
+
+def test_role_enum_covers_pipeline() -> None:
+    assert {r.value for r in Role} == {"plan", "research", "code", "review"}
