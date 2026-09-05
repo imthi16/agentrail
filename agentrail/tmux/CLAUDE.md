@@ -9,13 +9,14 @@ pyproject.toml and the object model must be re-verified on upgrade.
 `Server → Session → Window → Pane` (typed objects).
 ```python
 import libtmux
-server = libtmux.Server()                                   # optional socket_name=...
+
+server = libtmux.Server()  # optional socket_name=...
 session = server.new_session("agentrail-<stage-id>", kill_session=False)
 # lookup instead of create: server.sessions.get(session_name="agentrail-<id>")
 window = session.new_window(window_name="tests", attach=False)
-pane = window.active_pane                                    # or window.split()
-pane.send_keys("pytest -q", enter=True)                     # enter=False types w/o running
-lines = pane.capture_pane()                                 # -> list[str]
+pane = window.active_pane  # or window.split()
+pane.send_keys("pytest -q", enter=True)  # enter=False types w/o running
+lines = pane.capture_pane()  # -> list[str]
 ```
 - Filter/lookup: `server.sessions.get(session_name=...)`, `.filter(...)`.
 - `capture_pane()` returns a list of lines; pass `escape_sequences=True` to keep

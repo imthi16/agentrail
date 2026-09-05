@@ -277,6 +277,9 @@ def run(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Plan the full stage sequence without side effects."
     ),
+    no_guard: bool = typer.Option(
+        False, "--no-guard", help="Disable the post-harness Semantic Edit Guard for this run."
+    ),
 ) -> None:
     """Execute the approved workflow stage-by-stage (worktree, checkpoint, PR)."""
 
@@ -291,7 +294,7 @@ def run(
         )
         raise typer.Exit(code=1)
 
-    runner = WorkflowRunner(root, mode=workflow.mode)
+    runner = WorkflowRunner(root, mode=workflow.mode, guard_enabled=not no_guard)
     try:
         report = runner.run(workflow, dry_run=dry_run)
     except StageBlockedError as exc:

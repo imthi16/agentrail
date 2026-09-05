@@ -40,6 +40,13 @@ class OpencodeApiAdapter:
             swarm=False,
             non_interactive=True,
             providers=("opencode",),
+            # An HTTP chat call, not a process: never supervise it in a pane.
+            process_backed=False,
+            # The routed model really is sent, in the POST body.
+            model_selection=True,
+            # Returns text; it does not edit the worktree, so an empty worktree
+            # after this adapter runs is expected, not a failure.
+            edits_files=False,
         )
 
     def import_key(self) -> str | None:

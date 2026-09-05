@@ -33,6 +33,13 @@ class JcodeAdapter:
 
     name: str = "jcode"
     runner: Runner = field(default=default_runner)
+    # Opt-in and OPERATOR-ASSERTED. jcode's verified surface (adapters/CLAUDE.md)
+    # is `run` / `--resume` / `serve|connect` / `login --provider` — there is NO
+    # verified model flag, and guessing one would break every real invocation
+    # with an unknown-argument error. Set from config.harness_options.model_flag
+    # only when your build is known to accept it.
+    model_flag: str | None = None
+    extra_args: list[str] = field(default_factory=list)
 
     def available(self) -> bool:
         return harness_available(BINARY)
@@ -43,13 +50,18 @@ class JcodeAdapter:
             swarm=True,
             non_interactive=True,
             providers=("claude", "openai", "gemini"),
+            process_backed=True,
+            model_selection=self.model_flag is not None,
+            edits_files=True,
         )
 
     def build_argv(self, prompt: str, *, mode: Mode, model_id: str | None) -> list[str]:
-        # jcode runs non-interactively with `jcode run "<prompt>"`. Model routing
-        # is applied by the profile layer; mode is enforced by the policies gate,
-        # not by jcode flags, so it is not injected into the argv here.
-        return [BINARY, "run", prompt]
+        # jcode runs non-interactively with `jcode run "<prompt>"`. Mode is
+        # enforced by the policies gate, not by jcode flags, so it is never
+        # injected here. The model flag is emitted only when the operator has
+        # configured one (see model_flag above).
+        flags = [self.model_flag, model_id] if (self.model_flag and model_id) else []
+        return [BINARY, "run", *self.extra_args, *flags, prompt]
 
     def start(
         self,

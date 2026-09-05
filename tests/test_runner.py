@@ -378,3 +378,98 @@ def test_resume_skips_completed_stages(temp_git_repo: Path) -> None:
     assert report.stages == []  # nothing re-executed
     skipped = [e for e in EventLog(temp_git_repo).read() if e.type == "stage.skipped"]
     assert {e.stage_id for e in skipped} >= {"analyse", "login", "logout"}
+
+
+class BrokenPythonAdapter:
+    """Writes unparseable Python, the exact blast radius the guard exists for."""
+
+    name = "broken"
+
+    def build_argv(self, prompt: str, *, mode: Mode, model_id: str | None) -> list[str]:
+        return ["broken"]
+
+    def start(self, prompt, *, mode, model_id, cwd, dry_run=False):  # type: ignore[no-untyped-def]
+        from agentrail.adapters import SessionHandle
+
+        (Path(cwd) / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+        return SessionHandle(adapter=self.name, name="b", cwd=cwd, started=True)
+
+
+def test_default_guard_blocks_stage_that_writes_broken_python(temp_git_repo: Path) -> None:
+    from agentrail.runner import StageBlockedError
+
+    init_config(temp_git_repo)
+    workflow = plan_workflow("Add a healthcheck endpoint")
+    workflow.status = WorkflowStatus.APPROVED
+    save_workflow(temp_git_repo, workflow)
+
+    runner = WorkflowRunner(temp_git_repo, adapter=BrokenPythonAdapter())  # type: ignore[arg-type]
+    # The guard is on by default -- nothing is injected here.
+    assert runner.edit_guard is not None
+
+    with pytest.raises(StageBlockedError):
+        runner.run(workflow)
+
+    events = EventLog(temp_git_repo).read()
+    reverted = [e for e in events if e.type == "stage.guard_reverted"]
+    assert len(reverted) == 1
+    attrs = reverted[0].attributes
+    assert attrs["reverted"] is True
+    assert attrs["checks"] == ["python_syntax"]
+    # The rejected work is recoverable rather than silently destroyed.
+    assert attrs["recovery_checkpoint_id"]
+    assert attrs["recovery_checkpoint_id"] != attrs["checkpoint_id"]
+    # And the broken file is gone from the worktree.
+    assert not (worktree_path(temp_git_repo, "analyse") / "broken.py").exists()
+
+
+def test_guard_disabled_by_config_lets_the_stage_through(temp_git_repo: Path) -> None:
+    from agentrail.config import Config, GuardSettings, write_config
+
+    write_config(temp_git_repo, Config(guard=GuardSettings(enabled=False)))
+    workflow = plan_workflow("Add a healthcheck endpoint")
+    workflow.status = WorkflowStatus.APPROVED
+    save_workflow(temp_git_repo, workflow)
+
+    runner = WorkflowRunner(temp_git_repo, adapter=BrokenPythonAdapter())  # type: ignore[arg-type]
+    assert runner.edit_guard is None
+    runner.run(workflow)
+
+    events = EventLog(temp_git_repo).read()
+    assert any(e.type == "stage.guard_skipped" for e in events)
+    assert (worktree_path(temp_git_repo, "analyse") / "broken.py").exists()
+
+
+def test_no_guard_flag_disables_the_guard(temp_git_repo: Path) -> None:
+    init_config(temp_git_repo)
+    runner = WorkflowRunner(temp_git_repo, guard_enabled=False)
+    assert runner.edit_guard is None
+
+
+def test_guard_keeps_work_when_revert_on_failure_is_false(temp_git_repo: Path) -> None:
+    from agentrail.config import Config, GuardSettings, write_config
+    from agentrail.runner import StageBlockedError
+
+    write_config(temp_git_repo, Config(guard=GuardSettings(revert_on_failure=False)))
+    workflow = plan_workflow("Add a healthcheck endpoint")
+    workflow.status = WorkflowStatus.APPROVED
+    save_workflow(temp_git_repo, workflow)
+
+    runner = WorkflowRunner(temp_git_repo, adapter=BrokenPythonAdapter())  # type: ignore[arg-type]
+    with pytest.raises(StageBlockedError):
+        runner.run(workflow)
+
+    # Blocked, but the harness's output survives for inspection.
+    assert (worktree_path(temp_git_repo, "analyse") / "broken.py").exists()
+
+
+def test_guard_passed_event_for_a_clean_stage(temp_git_repo: Path) -> None:
+    init_config(temp_git_repo)
+    workflow = plan_workflow("Add a healthcheck endpoint")
+    workflow.status = WorkflowStatus.APPROVED
+    save_workflow(temp_git_repo, workflow)
+
+    WorkflowRunner(temp_git_repo, adapter=FakeAdapter()).run(workflow)  # type: ignore[arg-type]
+
+    events = EventLog(temp_git_repo).read()
+    assert any(e.type == "stage.guard_passed" for e in events)

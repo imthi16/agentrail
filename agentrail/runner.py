@@ -20,7 +20,7 @@ from agentrail.adapters import (
     JcodeAdapter,
     OpencodeApiAdapter,
 )
-from agentrail.checkpoints import CheckpointStore, SemanticEditGuard
+from agentrail.checkpoints import CheckpointStore, SemanticEditGuard, build_edit_guard
 from agentrail.config import Config, load_config
 from agentrail.events import EventLog, new_id
 from agentrail.git import PullRequestManager
@@ -86,6 +86,9 @@ class WorkflowRunner:
     adapter: HarnessAdapter = field(default_factory=JcodeAdapter)
     provider: Provider = Provider.ANTHROPIC
     edit_guard: SemanticEditGuard | None = None
+    # `agentrail run --no-guard`: a default-on destructive feature needs an off
+    # switch that is not a YAML edit.
+    guard_enabled: bool = True
 
     def __post_init__(self) -> None:
         self._log = EventLog(self.root)
@@ -96,6 +99,15 @@ class WorkflowRunner:
         self._budget = self._config.budget
         self._router: ModelRouter | None = None
         self._tracker: BudgetTracker | None = None
+        # Built here rather than in cli.py so every entry point (CLI, tests,
+        # library callers) gets the guard the invariant advertises. An explicitly
+        # injected guard still wins.
+        if self.edit_guard is None and self.guard_enabled:
+            self.edit_guard = build_edit_guard(
+                enabled=self._config.guard.enabled,
+                names=self._config.guard.checks,
+                max_retries=self._budget.max_retries_per_stage,
+            )
 
     def _load_config(self) -> Config:
         try:
@@ -324,10 +336,40 @@ class WorkflowRunner:
 
         # Post-edit Semantic Edit Guard (blast-radius check). If any check fails,
         # auto-revert the worktree to the checkpoint and block the stage.
-        if self.edit_guard is not None:
+        if self.edit_guard is None:
+            self._log.emit(
+                type="stage.guard_skipped",
+                workflow_id=workflow.workflow_id,
+                trace_id=trace,
+                span_id=span,
+                stage_id=stage.id,
+                mode=self.mode,
+                attributes={"reason": "guard disabled"},
+            )
+        else:
+            checks = [getattr(c, "name", type(c).__name__) for c in self.edit_guard.checks]
             ok, message = self.edit_guard.run_checks(Path(worktree.path))
-            if not ok:
-                self._checkpoints.rollback(stage.id, Path(worktree.path), checkpoint_id)
+            if ok:
+                self._log.emit(
+                    type="stage.guard_passed",
+                    workflow_id=workflow.workflow_id,
+                    trace_id=trace,
+                    span_id=span,
+                    stage_id=stage.id,
+                    mode=self.mode,
+                    attributes={"checks": checks},
+                )
+            else:
+                # Snapshot what the harness produced BEFORE destroying it:
+                # rollback is `git reset --hard` + `git clean -fd`, so without
+                # this the operator has no way to inspect the rejected work.
+                # NOTE: the snapshot records a diff + hash manifest, so content
+                # of untracked files is still lost on clean -fd.
+                recovery_id = self._checkpoints.create(stage.id, Path(worktree.path))
+                stage.checkpoints.append(recovery_id)
+                reverted = self._config.guard.revert_on_failure
+                if reverted:
+                    self._checkpoints.rollback(stage.id, Path(worktree.path), checkpoint_id)
                 stage.status = StageStatus.BLOCKED
                 self._log.emit(
                     type="stage.guard_reverted",
@@ -336,7 +378,13 @@ class WorkflowRunner:
                     span_id=span,
                     stage_id=stage.id,
                     mode=self.mode,
-                    attributes={"error": message, "checkpoint_id": checkpoint_id},
+                    attributes={
+                        "error": message,
+                        "checkpoint_id": checkpoint_id,
+                        "recovery_checkpoint_id": recovery_id,
+                        "checks": checks,
+                        "reverted": reverted,
+                    },
                 )
                 raise StageBlockedError(f"stage {stage.id!r} blocked by edit guard: {message}")
 
