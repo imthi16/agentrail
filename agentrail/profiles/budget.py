@@ -34,6 +34,14 @@ DEFAULT_PRICES: PriceTable = {
     "gpt-5.6-sol": (10.0, 40.0),
     "gpt-5.6-terra": (2.0, 10.0),
     "gpt-5.6-luna": (0.50, 2.0),
+    # z.ai (docs.z.ai) Sep 2026: GLM-5.3 = 1.40/4.40; Flash is radically cheap.
+    "glm-5.3": (1.40, 4.40),
+    "glm-5.2": (1.40, 4.40),
+    "glm-5.3-flash": (0.07, 0.25),
+    # OpenCode Zen/Go catalog (opencode.ai/docs/zen) Sep 2026.
+    "kimi-k3": (3.0, 15.0),
+    "qwen3.8-max": (2.0, 6.0),
+    "qwen3.8-flash": (0.15, 0.47),
 }
 
 

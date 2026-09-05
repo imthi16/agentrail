@@ -12,11 +12,12 @@ from agentrail.profiles.registry import (
     DEFAULT_REGISTRY,
     ProfileRegistry,
     Provider,
+    Role,
     TierSpec,
     WorkKind,
     tier_for_work,
 )
-from agentrail.profiles.router import ModelRouter
+from agentrail.profiles.router import ModelRouter, RoleBindSpec
 
 __all__ = [
     "DEFAULT_PRICES",
@@ -26,6 +27,8 @@ __all__ = [
     "ModelRouter",
     "ProfileRegistry",
     "Provider",
+    "Role",
+    "RoleBindSpec",
     "TierSpec",
     "WorkKind",
     "estimate_cost",

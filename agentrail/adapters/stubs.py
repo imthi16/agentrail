@@ -67,6 +67,11 @@ class ClaudeCodeAdapter(_BaseStub):
             swarm=False,
             non_interactive=True,
             providers=("claude",),
+            process_backed=True,
+            # No model flag verified against a pinned harness version; see
+            # adapters/CLAUDE.md — we do not ship flags we have not verified.
+            model_selection=False,
+            edits_files=True,
         )
 
     def build_argv(self, prompt: str, *, mode: Mode, model_id: str | None) -> list[str]:  # noqa: ARG002
@@ -84,6 +89,11 @@ class CodexAdapter(_BaseStub):
             swarm=False,
             non_interactive=True,
             providers=("openai",),
+            process_backed=True,
+            # No model flag verified against a pinned harness version; see
+            # adapters/CLAUDE.md — we do not ship flags we have not verified.
+            model_selection=False,
+            edits_files=True,
         )
 
     def build_argv(self, prompt: str, *, mode: Mode, model_id: str | None) -> list[str]:  # noqa: ARG002
@@ -103,6 +113,11 @@ class GeminiAdapter(_BaseStub):
             swarm=False,
             non_interactive=True,
             providers=("gemini",),
+            process_backed=True,
+            # No model flag verified against a pinned harness version; see
+            # adapters/CLAUDE.md — we do not ship flags we have not verified.
+            model_selection=False,
+            edits_files=True,
         )
 
     def build_argv(self, prompt: str, *, mode: Mode, model_id: str | None) -> list[str]:  # noqa: ARG002

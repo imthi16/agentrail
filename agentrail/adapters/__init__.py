@@ -9,6 +9,7 @@ from agentrail.adapters.base import (
     harness_available,
 )
 from agentrail.adapters.jcode import JcodeAdapter
+from agentrail.adapters.opencode import OpencodeApiAdapter
 from agentrail.adapters.stubs import (
     ClaudeCodeAdapter,
     CodexAdapter,
@@ -17,6 +18,7 @@ from agentrail.adapters.stubs import (
 
 _ADAPTERS: dict[str, type] = {
     "jcode": JcodeAdapter,
+    "opencode": OpencodeApiAdapter,
     "claude-code": ClaudeCodeAdapter,
     "codex": CodexAdapter,
     "gemini": GeminiAdapter,
@@ -45,6 +47,7 @@ __all__ = [
     "GeminiAdapter",
     "HarnessAdapter",
     "JcodeAdapter",
+    "OpencodeApiAdapter",
     "SessionHandle",
     "adapter_names",
     "get_adapter",

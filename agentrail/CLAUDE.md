@@ -6,14 +6,20 @@ delegate to subsystems.
 
 ## Modules
 - `cli.py` — Typer app; entry point `agentrail` (`[project.scripts]` → `cli:main`).
-  Commands: `version`, `init`, `plan`, `status`, `run`, `pause`, `resume`,
-  `rollback`. Commands orchestrate; they don't contain subsystem logic.
-- `config.py` — loads/writes `.agentrail/config.yaml` (project config: default
-  mode, default profile, harness/adapter choice, budgets). Validate on load.
+  Commands: `version`, `init`, `plan`, `approve`, `status`, `run`, `pause`,
+  `resume`, `rollback`, `ready`. Commands orchestrate; they don't contain
+  subsystem logic.
+- `config.py` — loads/writes `.agentrail/config.yaml` (default mode, profile,
+  harness choice, budgets, `roles:`, `opencode:`, `tmux:`, `guard:`,
+  `harness_options:`). Validated on load; every block is `extra="forbid"`.
 - `models.py` — typed dataclasses/pydantic models: `Workflow`, `Stage`,
   `IntentLock`, `Checkpoint`, `Profile`. These are the single source of truth for
   serialization to/from YAML.
 - `workflow.py` — **DAG Planner** + persistence to `.agentrail/workflow.yaml`.
+  NOTE: `_default_stages` is still a heuristic string split, not LLM-backed
+  planning — don't cite it as the planner contract being met.
+- `runner.py` — stage execution loop: worktree → checkpoint → policy admission →
+  supervised harness → edit guard → stacked draft PR.
 
 ## DAG Planner contract (in workflow.py)
 - Turn a natural-language goal into a JSON/YAML-schema-validated list of stages,

@@ -15,15 +15,17 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from agentrail.models import Profile, Tier
+from agentrail.models import Profile, Provider, Role, Tier
 
-
-class Provider(StrEnum):
-    """Model family / provider (step one of the picker)."""
-
-    ANTHROPIC = "anthropic"
-    GOOGLE = "google"
-    OPENAI = "openai"
+__all__ = [
+    "DEFAULT_REGISTRY",
+    "ProfileRegistry",
+    "Provider",  # re-export: canonical definition lives in models.py
+    "Role",  # re-export likewise
+    "TierSpec",
+    "WorkKind",
+    "tier_for_work",
+]
 
 
 class TierSpec(BaseModel):
@@ -96,6 +98,22 @@ DEFAULT_REGISTRY = ProfileRegistry(
             Tier.DEEP: TierSpec(model_id="gpt-5.6-sol", thinking_param="high"),
             Tier.BALANCED: TierSpec(model_id="gpt-5.6-terra", thinking_param="medium"),
             Tier.FAST: TierSpec(model_id="gpt-5.6-luna", thinking_param="low"),
+        },
+        Provider.ZAI: {
+            # z.ai (docs.z.ai, verified Aug 2026): GLM-5.3 is the open-weights
+            # #1 coding model; GLM-5.3-Flash is radically cheaper ($0.07/$0.25).
+            # thinking is mandatory on 5.3; effort levels Low/High/Max.
+            Tier.DEEP: TierSpec(model_id="glm-5.3", thinking_param="max"),
+            Tier.BALANCED: TierSpec(model_id="glm-5.2", thinking_param="high"),
+            Tier.FAST: TierSpec(model_id="glm-5.3-flash", thinking_param="low"),
+        },
+        Provider.OPENCODE: {
+            # OpenCode Go/Zen catalog (opencode.ai/docs/zen, verified Aug 2026).
+            # Kimi K3 = repo-scale coding; Qwen3.8 Max = balanced; Qwen3.8 Flash
+            # = cheap/fast. Deprecated IDs (kimi-k2.x, glm-5.1) never pinned.
+            Tier.DEEP: TierSpec(model_id="kimi-k3"),
+            Tier.BALANCED: TierSpec(model_id="qwen3.8-max"),
+            Tier.FAST: TierSpec(model_id="qwen3.8-flash"),
         },
     }
 )

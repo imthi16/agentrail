@@ -54,6 +54,47 @@ class Tier(StrEnum):
     FAST = "fast"
 
 
+class Provider(StrEnum):
+    """Model family / provider (step one of the picker). Kept in models.py because
+    config.py + profiles/ both need it without a circular import."""
+
+    ANTHROPIC = "anthropic"
+    GOOGLE = "google"
+    OPENAI = "openai"
+    ZAI = "zai"
+    OPENCODE = "opencode"
+
+
+class Role(StrEnum):
+    """Named pipeline roles bound to (provider, tier) via config.roles.
+
+    plan/research/code/review realize the solo-developer pipeline. VERIFY and
+    MARKET slot into the same table later without a schema change.
+    """
+
+    PLAN = "plan"
+    RESEARCH = "research"
+    CODE = "code"
+    REVIEW = "review"
+
+
+class GuardCheck(StrEnum):
+    """Named Semantic Edit Guard checks (checkpoints/checks.py).
+
+    An ALLOWLIST, deliberately not free-form shell: the guard runs outside the
+    policies gate with control-plane privileges, and ``.agentrail/config.yaml``
+    is writable from inside a stage worktree. Arbitrary commands here would let
+    a harness escape its Intent Lock via the very subsystem meant to catch bad
+    edits. Only PYTHON_SYNTAX is enabled by default; see checks.py.
+    """
+
+    PYTHON_SYNTAX = "python_syntax"
+    RUFF = "ruff"
+    RUFF_FORMAT = "ruff_format"
+    MYPY = "mypy"
+    PYTEST = "pytest"
+
+
 def _utcnow() -> datetime:
     return datetime.now(UTC)
 
@@ -110,7 +151,7 @@ class Profile(_Base):
     """
 
     name: str
-    provider: str
+    provider: Provider
     tier: Tier
     model_id: str
     thinking_param: str | None = None

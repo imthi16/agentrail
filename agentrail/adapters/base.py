@@ -52,6 +52,16 @@ class Capabilities:
     swarm: bool = False
     non_interactive: bool = False
     providers: tuple[str, ...] = ()
+    # Runs as an OS process, so it can be supervised in a tmux pane. False for
+    # API-backed adapters (an HTTP call gains nothing from a pane).
+    process_backed: bool = True
+    # The adapter can actually APPLY a routed model_id. False means routing is
+    # still resolved and logged, but the harness never receives the model —
+    # surfaced as a `profile.model_not_applied` event rather than a silent no-op.
+    model_selection: bool = False
+    # Mutates the worktree it is given. False for advisory/chat adapters, whose
+    # empty worktree is expected rather than a failure.
+    edits_files: bool = True
 
 
 class HarnessAdapter(Protocol):

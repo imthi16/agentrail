@@ -1,9 +1,19 @@
 """Stage-by-stage workflow runner — wires all subsystems for execution.
 
 Drives an APPROVED workflow through its topologically-ordered stages. For each
-stage it: creates an isolated worktree, checkpoints it, runs the harness in a
-tmux pane under the policies gate, runs the Semantic Edit Guard, then opens the
-(stacked) draft PR. Every step emits events.
+stage it: creates an isolated worktree, checkpoints it, authorizes the harness
+launch through the policies gate, runs the harness (in a supervised tmux pane
+when tmux is available and the adapter is process-backed, otherwise as a
+directly-captured subprocess — ``StagePlan.ran_in_tmux`` reports which), applies
+the Semantic Edit Guard's post-harness checks, then opens the (stacked) draft
+PR. Every step emits events.
+
+**Enforcement scope.** The policy gate here is a SESSION-level admission check:
+it decides whether the harness may run at all. Per-action interception of the
+edits and shell commands the harness then performs is not yet wired — see
+``policies/CLAUDE.md`` and ``docs/adr/0001-admission-gate-vs-per-action-interception.md``.
+Containment during the run comes from the worktree boundary, the pre-stage
+checkpoint, and the post-harness guard.
 
 Everything external (worktrees, checkpoints, tmux, harness, PRs) is injected or
 feature-detected, so the runner has a ``dry_run`` path that plans the full
@@ -15,21 +25,44 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agentrail.adapters import HarnessAdapter, JcodeAdapter
-from agentrail.checkpoints import CheckpointStore, SemanticEditGuard
-from agentrail.config import Budget, load_config
+from agentrail.adapters import (
+    HarnessAdapter,
+    JcodeAdapter,
+    OpencodeApiAdapter,
+    SessionHandle,
+    get_adapter,
+)
+from agentrail.checkpoints import CheckpointStore, SemanticEditGuard, build_edit_guard
+from agentrail.config import Config, load_config
 from agentrail.events import EventLog, new_id
 from agentrail.git import PullRequestManager
-from agentrail.models import IntentLock, Mode, Stage, StageStatus, Workflow, WorkflowStatus
+from agentrail.models import (
+    IntentLock,
+    Mode,
+    Profile,
+    Role,
+    Stage,
+    StageStatus,
+    Workflow,
+    WorkflowStatus,
+)
 from agentrail.policies import PolicyGate, read_lock, verify_stage_lock
 from agentrail.profiles import (
     BudgetExceededError,
     BudgetTracker,
     ModelRouter,
     Provider,
+    RoleBindSpec,
     WorkKind,
 )
-from agentrail.tmux import tmux_available
+from agentrail.tmux import (
+    HarnessExecutor,
+    PaneHandle,
+    TmuxHarnessExecutor,
+    TmuxSupervisor,
+    TmuxUnavailableError,
+    tmux_available,
+)
 from agentrail.workflow import save_workflow, topological_order
 from agentrail.workspaces import WorktreeManager
 
@@ -51,6 +84,12 @@ class StagePlan:
     harness_argv: list[str]
     ran_in_tmux: bool
     performed: bool
+    provider: str = ""
+    model_id: str = ""
+    # False means the model was routed and logged but the harness never received
+    # it (no verified flag for that harness) — visible, not a silent no-op.
+    model_applied: bool = False
+    pane_id: str | None = None
 
 
 @dataclass
@@ -69,24 +108,134 @@ class WorkflowRunner:
     root: Path
     mode: Mode = Mode.ACCEPT_EDITS
     default_base: str = "main"
-    adapter: HarnessAdapter = field(default_factory=JcodeAdapter)
+    adapter: HarnessAdapter | None = None
     provider: Provider = Provider.ANTHROPIC
     edit_guard: SemanticEditGuard | None = None
+    # `agentrail run --no-guard`: a default-on destructive feature needs an off
+    # switch that is not a YAML edit.
+    guard_enabled: bool = True
+    # Injected in tests so the suite never depends on a real tmux server.
+    executor: HarnessExecutor | None = None
 
     def __post_init__(self) -> None:
         self._log = EventLog(self.root)
         self._worktrees = WorktreeManager(self.root)
         self._checkpoints = CheckpointStore(self.root)
         self._prs = PullRequestManager(self.root, default_base=self.default_base)
-        self._budget = self._load_budget()
+        self._config = self._load_config()
+        self._budget = self._config.budget
+        if self.adapter is None:
+            self.adapter = self._build_adapter(self._config.harness)
+        self._adapter: HarnessAdapter = self.adapter
         self._router: ModelRouter | None = None
         self._tracker: BudgetTracker | None = None
+        self._executor = self._resolve_executor()
+        # Built here rather than in cli.py so every entry point (CLI, tests,
+        # library callers) gets the guard the invariant advertises. An explicitly
+        # injected guard still wins.
+        if self.edit_guard is None and self.guard_enabled:
+            self.edit_guard = build_edit_guard(
+                enabled=self._config.guard.enabled,
+                names=self._config.guard.checks,
+                max_retries=self._budget.max_retries_per_stage,
+            )
 
-    def _load_budget(self) -> Budget:
+    def _load_config(self) -> Config:
         try:
-            return load_config(self.root).budget
+            return load_config(self.root)
         except (FileNotFoundError, ValueError):
-            return Budget()
+            return Config()
+
+    def _role_binds(self) -> dict[Role, RoleBindSpec]:
+        return {
+            role: RoleBindSpec(provider=bind.provider, tier=bind.tier)
+            for role, bind in self._config.roles.items()
+        }
+
+    def _resolve_executor(self) -> HarnessExecutor | None:
+        """Build the tmux executor once, or None to fall back to direct start().
+
+        Resolved here rather than probed per stage so the run loop's behaviour
+        does not depend on the ambient environment mid-run.
+        """
+
+        if self.executor is not None:
+            return self.executor
+        if not self._config.tmux.enabled or not tmux_available():
+            return None
+        try:
+            supervisor = TmuxSupervisor(socket_name=self._config.tmux.socket_name)
+        except TmuxUnavailableError:
+            return None
+        return TmuxHarnessExecutor(
+            supervisor=supervisor,
+            timeout=self._config.tmux.timeout_seconds,
+        )
+
+    def _supervise(self, adapter: HarnessAdapter) -> bool:
+        """True when this adapter's run should go through a tmux pane."""
+
+        return self._executor is not None and adapter.capabilities().process_backed
+
+    def _run_harness(
+        self,
+        adapter: HarnessAdapter,
+        prompt: str,
+        *,
+        stage: Stage,
+        profile: Profile,
+        worktree_path: Path,
+        attempt: str,
+    ) -> tuple[SessionHandle, PaneHandle | None, bool, int | None]:
+        """Run the harness, supervised when possible. Never a bare Popen."""
+
+        if self._executor is not None and self._supervise(adapter):
+            argv = adapter.build_argv(prompt, mode=self.mode, model_id=profile.model_id)
+            result = self._executor.run_argv(
+                stage_id=stage.id,
+                adapter_name=adapter.name,
+                argv=argv,
+                cwd=worktree_path,
+                attempt=attempt,
+            )
+            return result.handle, result.pane, result.timed_out, result.exit_code
+
+        # API-backed adapters (and tmux-less environments) run directly.
+        handle = adapter.start(
+            prompt,
+            mode=self.mode,
+            model_id=profile.model_id,
+            cwd=worktree_path,
+            dry_run=False,
+        )
+        return handle, None, False, None
+
+    def _build_adapter(self, name: str) -> HarnessAdapter:
+        """Construct a named adapter, injecting operator-configured settings."""
+
+        if name == "opencode":
+            return OpencodeApiAdapter(settings=self._config.opencode)
+        if name == "jcode":
+            return JcodeAdapter(
+                model_flag=self._config.harness_options.model_flag,
+                extra_args=list(self._config.harness_options.extra_args),
+            )
+        return get_adapter(name)
+
+    def _adapter_for(self, provider: Provider) -> HarnessAdapter:
+        """Pick the adapter for a routed provider.
+
+        An explicit provider -> adapter mapping wins, so routing can actually
+        change which harness runs. The map is empty by default, preserving the
+        previous behaviour.
+        """
+
+        mapped = self._config.harness_options.provider_adapters.get(provider)
+        if mapped is not None:
+            return self._build_adapter(mapped)
+        if provider is Provider.OPENCODE:
+            return OpencodeApiAdapter(settings=self._config.opencode)
+        return self._adapter
 
     def run(self, workflow: Workflow, *, dry_run: bool = False) -> RunReport:
         """Run every stage in dependency order; persist status transitions."""
@@ -104,6 +253,7 @@ class WorkflowRunner:
             event_log=self._log,
             workflow_id=workflow.workflow_id,
             trace_id=trace,
+            role_binds=self._role_binds(),
         )
         self._tracker = BudgetTracker(
             budget=self._budget,
@@ -183,9 +333,13 @@ class WorkflowRunner:
             attributes={"base": base, "dry_run": dry_run},
         )
 
+        role = self._role(stage)
+        profile = self._resolve_role(role, stage)
+        adapter = self._adapter_for(profile.provider)
+
         prompt = f"{stage.title}. {stage.description}".strip()
-        argv = self.adapter.build_argv(prompt, mode=self.mode, model_id=None)
-        use_tmux = tmux_available()
+        argv = adapter.build_argv(prompt, mode=self.mode, model_id=profile.model_id)
+        use_tmux = self._supervise(adapter)
         checkpoint_id: str | None = None
         pr_head = f"stage/{stage.id}"
 
@@ -201,6 +355,9 @@ class WorkflowRunner:
                 harness_argv=argv,
                 ran_in_tmux=use_tmux,
                 performed=False,
+                provider=profile.provider.value,
+                model_id=profile.model_id,
+                model_applied=adapter.capabilities().model_selection,
             )
 
         # --- Real execution path -------------------------------------------
@@ -231,11 +388,10 @@ class WorkflowRunner:
             )
             raise StageBlockedError(f"stage {stage.id!r} blocked: {admit_reason}")
 
-        # Route the model tier for this stage (Deep for analysis/planning,
-        # Balanced for implementation) and record the estimated spend against
-        # the budget. Over-budget fails closed as a blocked stage.
+        # Route resolved above (unified path: profile + adapter picked up front);
+        # here we only record the estimated spend against the budget. Over-budget
+        # fails closed as a blocked stage.
         assert self._router is not None and self._tracker is not None
-        profile = self._router.route(self._work_kind(stage), stage_id=stage.id)
         try:
             self._tracker.record_call(
                 provider=profile.provider,
@@ -252,6 +408,29 @@ class WorkflowRunner:
         # Authorize the harness launch through the policy gate (invariant #1).
         # A mutating harness is an EDIT against the worktree; plan mode denies,
         # manual asks, accept_edits/auto allow (auto bounded by the Intent Lock).
+        # Distinguish "this harness isn't installed / configured" from "it ran and
+        # failed". Without this an unset OPENCODE_API_KEY surfaced as the
+        # misleading "harness did not start", and the default roles table binds
+        # `research` to OpenCode, so research stages hit it routinely.
+        if not adapter.available():
+            stage.status = StageStatus.FAILED
+            self._log.emit(
+                type="stage.failed",
+                workflow_id=workflow.workflow_id,
+                trace_id=trace,
+                span_id=span,
+                stage_id=stage.id,
+                mode=self.mode,
+                attributes={
+                    "reason": f"adapter {adapter.name} unavailable",
+                    "provider": profile.provider.value,
+                },
+            )
+            raise StageBlockedError(
+                f"stage {stage.id!r} failed: adapter {adapter.name!r} is unavailable "
+                f"(provider {profile.provider.value!r})"
+            )
+
         auth = gate.authorize_session(argv)
         if not auth.performed:
             self._checkpoints.rollback(stage.id, Path(worktree.path), checkpoint_id)
@@ -269,13 +448,79 @@ class WorkflowRunner:
                 f"stage {stage.id!r} blocked: harness launch denied ({auth.reason})"
             )
 
-        handle = self.adapter.start(
-            prompt,
+        caps = adapter.capabilities()
+        model_applied = caps.model_selection and profile.model_id != ""
+        self._log.emit(
+            type="harness.invocation",
+            workflow_id=workflow.workflow_id,
+            trace_id=trace,
+            span_id=span,
+            stage_id=stage.id,
             mode=self.mode,
-            model_id=profile.model_id,
-            cwd=Path(worktree.path),
-            dry_run=False,
+            attributes={
+                "adapter": adapter.name,
+                "provider": profile.provider.value,
+                "tier": profile.tier.value,
+                "model_id": profile.model_id,
+                "model_applied": model_applied,
+                "ran_in_tmux": use_tmux,
+            },
         )
+        if not model_applied:
+            # The routing decision is real and auditable even when the harness
+            # cannot receive the model: surface it rather than pretending the
+            # profile subsystem changed the invocation.
+            self._log.emit(
+                type="profile.model_not_applied",
+                workflow_id=workflow.workflow_id,
+                trace_id=trace,
+                span_id=span,
+                stage_id=stage.id,
+                mode=self.mode,
+                attributes={
+                    "adapter": adapter.name,
+                    "provider": profile.provider.value,
+                    "model_id": profile.model_id,
+                    "reason": f"{adapter.name} exposes no verified model flag",
+                },
+            )
+
+        handle, pane, timed_out, exit_code = self._run_harness(
+            adapter,
+            prompt,
+            stage=stage,
+            profile=profile,
+            worktree_path=Path(worktree.path),
+            attempt=span,
+        )
+        if pane is not None and checkpoint_id is not None:
+            # Now that the pane exists, record it against the checkpoint taken
+            # before the harness ran, so rollback/reattach can find it.
+            self._checkpoints.record_tmux(stage.id, checkpoint_id, pane.as_dict())
+        if timed_out:
+            # Deliberately NO rollback and NO pane kill: the harness may still be
+            # writing into this worktree, so `git reset --hard` would race it, and
+            # the pane is the operator's only forensic surface.
+            stage.status = StageStatus.FAILED
+            self._log.emit(
+                type="stage.timeout",
+                workflow_id=workflow.workflow_id,
+                trace_id=trace,
+                span_id=span,
+                stage_id=stage.id,
+                mode=self.mode,
+                attributes={
+                    "timeout_seconds": self._config.tmux.timeout_seconds,
+                    "pane_id": pane.pane_id if pane else None,
+                    "session_id": pane.session_id if pane else None,
+                    "argv": argv,
+                },
+            )
+            raise StageBlockedError(
+                f"stage {stage.id!r} timed out after "
+                f"{self._config.tmux.timeout_seconds}s; the pane was left running "
+                f"for inspection (tmux attach -t agentrail-{stage.id})"
+            )
         if not handle.started:
             # Harness missing or exited nonzero: do not mark the stage complete.
             stage.status = StageStatus.FAILED
@@ -286,7 +531,12 @@ class WorkflowRunner:
                 span_id=span,
                 stage_id=stage.id,
                 mode=self.mode,
-                attributes={"reason": "harness did not start", "argv": argv},
+                attributes={
+                    "reason": "harness did not start",
+                    "argv": argv,
+                    "exit_code": exit_code,
+                    "output_tail": handle.output.splitlines()[-20:],
+                },
             )
             raise StageBlockedError(
                 f"stage {stage.id!r} failed: harness did not start ({argv[0]!r})"
@@ -294,10 +544,40 @@ class WorkflowRunner:
 
         # Post-edit Semantic Edit Guard (blast-radius check). If any check fails,
         # auto-revert the worktree to the checkpoint and block the stage.
-        if self.edit_guard is not None:
+        if self.edit_guard is None:
+            self._log.emit(
+                type="stage.guard_skipped",
+                workflow_id=workflow.workflow_id,
+                trace_id=trace,
+                span_id=span,
+                stage_id=stage.id,
+                mode=self.mode,
+                attributes={"reason": "guard disabled"},
+            )
+        else:
+            checks = [getattr(c, "name", type(c).__name__) for c in self.edit_guard.checks]
             ok, message = self.edit_guard.run_checks(Path(worktree.path))
-            if not ok:
-                self._checkpoints.rollback(stage.id, Path(worktree.path), checkpoint_id)
+            if ok:
+                self._log.emit(
+                    type="stage.guard_passed",
+                    workflow_id=workflow.workflow_id,
+                    trace_id=trace,
+                    span_id=span,
+                    stage_id=stage.id,
+                    mode=self.mode,
+                    attributes={"checks": checks},
+                )
+            else:
+                # Snapshot what the harness produced BEFORE destroying it:
+                # rollback is `git reset --hard` + `git clean -fd`, so without
+                # this the operator has no way to inspect the rejected work.
+                # NOTE: the snapshot records a diff + hash manifest, so content
+                # of untracked files is still lost on clean -fd.
+                recovery_id = self._checkpoints.create(stage.id, Path(worktree.path))
+                stage.checkpoints.append(recovery_id)
+                reverted = self._config.guard.revert_on_failure
+                if reverted:
+                    self._checkpoints.rollback(stage.id, Path(worktree.path), checkpoint_id)
                 stage.status = StageStatus.BLOCKED
                 self._log.emit(
                     type="stage.guard_reverted",
@@ -306,13 +586,37 @@ class WorkflowRunner:
                     span_id=span,
                     stage_id=stage.id,
                     mode=self.mode,
-                    attributes={"error": message, "checkpoint_id": checkpoint_id},
+                    attributes={
+                        "error": message,
+                        "checkpoint_id": checkpoint_id,
+                        "recovery_checkpoint_id": recovery_id,
+                        "checks": checks,
+                        "reverted": reverted,
+                    },
                 )
                 raise StageBlockedError(f"stage {stage.id!r} blocked by edit guard: {message}")
 
         # Commit the stage's worktree changes so they land in the PR, and push
         # the branch when a remote is available (verified git/gh commands).
         committed = self._commit_stage(stage, Path(worktree.path))
+        if not committed:
+            # An advisory adapter (chat/API) legitimately leaves a clean worktree;
+            # a process harness leaving one means it did nothing. Either way the
+            # branch is empty, so `gh pr create` would fail on a repo with a
+            # remote -- surface it instead of failing opaquely later.
+            self._log.emit(
+                type="stage.no_changes",
+                workflow_id=workflow.workflow_id,
+                trace_id=trace,
+                span_id=span,
+                stage_id=stage.id,
+                mode=self.mode,
+                attributes={
+                    "adapter": adapter.name,
+                    "advisory_only": not caps.edits_files,
+                    "output": handle.output[:2000],
+                },
+            )
 
         pr_ref = self._prs.create_for_stage(stage, workflow, dry_run=not self._prs_ready())
         stage.pull_request = pr_ref
@@ -343,6 +647,10 @@ class WorkflowRunner:
             harness_argv=argv,
             ran_in_tmux=use_tmux,
             performed=True,
+            provider=profile.provider.value,
+            model_id=profile.model_id,
+            model_applied=model_applied,
+            pane_id=pane.pane_id if pane else None,
         )
 
     def _stage_base(self, stage: Stage, workflow: Workflow) -> str:
@@ -420,8 +728,26 @@ class WorkflowRunner:
         )
 
     @staticmethod
+    def _role(stage: Stage) -> Role:
+        """Map a stage to a pipeline role for routing (heuristic)."""
+
+        text = f"{stage.id} {stage.title}".lower()
+        if any(k in text for k in ("review", "audit", "verify")):
+            return Role.REVIEW
+        if any(k in text for k in ("research", "discover", "investigate", "explore")):
+            return Role.RESEARCH
+        if any(k in text for k in ("analyse", "analyze", "design", "architect", "plan")):
+            return Role.PLAN
+        return Role.CODE
+
+    def _resolve_role(self, role: Role, stage: Stage) -> Profile:
+        assert self._router is not None
+        return self._router.route_role(role, stage_id=stage.id)
+
+    @staticmethod
     def _work_kind(stage: Stage) -> WorkKind:
-        """Map a stage to a work kind for tier routing (heuristic)."""
+        """Map a stage to a work kind for tier routing (heuristic, kept for
+        callers that don't need roles)."""
 
         text = f"{stage.id} {stage.title}".lower()
         if any(k in text for k in ("analyse", "analyze", "design", "architect", "plan")):
