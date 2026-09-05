@@ -58,13 +58,20 @@ pytest -q
 - All runtime state is file-based under `.agentrail/` (config.yaml,
   workflow.yaml, events.jsonl, checkpoints/, worktrees/) and gitignored.
 - Capability modes (`plan`/`manual`/`accept_edits`/`auto`) and Intent Lock are
-  enforced **in Python at the subprocess-interception layer** — never via
-  prompts or instruction files. Deny rules win; fail closed.
+  enforced **in Python**, never via prompts or instruction files. Deny rules win;
+  fail closed. **Scope today: session admission only** — the gate runs once
+  before a stage's harness launches; `PolicyGate.run_shell`/`write_file` (the
+  per-action layer) have no call site in `agentrail/` yet, so a running harness
+  is unmediated inside its worktree. See root CLAUDE.md invariant #1 and
+  `docs/adr/0001-admission-gate-vs-per-action-interception.md`.
 - Long-running processes go through the tmux supervisor (`agentrail/tmux/`),
-  never bare `subprocess.Popen`.
+  never bare `subprocess.Popen`. The runner supervises adapters declaring
+  `process_backed`; API adapters run directly. `ran_in_tmux` reports which.
 - Model IDs are never hardcoded — always route through the `profiles/` config
   table (`provider, tier`); note `claude-haiku-4-5-20251001`'s date suffix is
-  part of the ID.
+  part of the ID. A routed model only reaches a harness that declares
+  `model_selection`; otherwise it is logged as `profile.model_not_applied`.
+  Never add an unverified harness CLI flag — use `config.harness_options`.
 - One stage = one worktree `.agentrail/worktrees/<stage-id>/` on branch
   `stage/<stage-id>`; dependent stages produce **stacked** draft PRs whose base
   is the parent stage's head branch (never `main`). PRs go through `gh`, push

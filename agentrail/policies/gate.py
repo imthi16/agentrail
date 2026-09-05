@@ -200,8 +200,10 @@ class PolicyGate:
         """Authorize launching a (potentially mutating) harness session.
 
         This is a mode-level gate on *whether the harness may run at all* in the
-        worktree; per-action path/shell scoping is enforced by ``run_shell`` /
-        ``write_file`` (and, in auto, the Intent Lock) once live I/O lands.
+        worktree. Per-action path/shell scoping lives in ``run_shell`` /
+        ``write_file``, which are implemented and tested but **not yet called
+        during harness execution** — a running harness is unmediated inside its
+        worktree (v0.3; see docs/adr/0001-admission-gate-vs-per-action-interception.md).
         ``plan`` denies (read-only), ``manual`` asks, ``accept_edits``/``auto``
         allow. Auto additionally requires a verified Intent Lock. A tampered
         lock hash fails closed via ``_evaluate``'s hash check.

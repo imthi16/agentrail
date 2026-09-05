@@ -1,9 +1,19 @@
 """Stage-by-stage workflow runner — wires all subsystems for execution.
 
 Drives an APPROVED workflow through its topologically-ordered stages. For each
-stage it: creates an isolated worktree, checkpoints it, runs the harness in a
-tmux pane under the policies gate, runs the Semantic Edit Guard, then opens the
-(stacked) draft PR. Every step emits events.
+stage it: creates an isolated worktree, checkpoints it, authorizes the harness
+launch through the policies gate, runs the harness (in a supervised tmux pane
+when tmux is available and the adapter is process-backed, otherwise as a
+directly-captured subprocess — ``StagePlan.ran_in_tmux`` reports which), applies
+the Semantic Edit Guard's post-harness checks, then opens the (stacked) draft
+PR. Every step emits events.
+
+**Enforcement scope.** The policy gate here is a SESSION-level admission check:
+it decides whether the harness may run at all. Per-action interception of the
+edits and shell commands the harness then performs is not yet wired — see
+``policies/CLAUDE.md`` and ``docs/adr/0001-admission-gate-vs-per-action-interception.md``.
+Containment during the run comes from the worktree boundary, the pre-stage
+checkpoint, and the post-harness guard.
 
 Everything external (worktrees, checkpoints, tmux, harness, PRs) is injected or
 feature-detected, so the runner has a ``dry_run`` path that plans the full

@@ -17,6 +17,7 @@ degrade gracefully instead of crashing the build.
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import shutil
@@ -196,7 +197,13 @@ class TmuxSupervisor:
         # no `$?`), and the subshell stops a command calling `exit` from skipping
         # the status line (which would look identical to a timeout).
         inner = f"cd {shlex.quote(str(cwd))} && {command}" if cwd is not None else command
-        script = f"( {inner} )\n__ar_rc=$?\necho {sentinel} rc=$__ar_rc\n"
+        # Pin PATH to the control plane's. A tmux server can long outlive the
+        # process that starts a run, so a pane would otherwise inherit whatever
+        # PATH the server was created with — meaning *which* harness binary runs
+        # would depend on when the tmux server happened to start, not on the
+        # environment AgentRail was invoked in. Observed in practice.
+        exports = f"PATH={shlex.quote(os.environ.get('PATH', ''))}\nexport PATH\n"
+        script = f"{exports}( {inner} )\n__ar_rc=$?\necho {sentinel} rc=$__ar_rc\n"
         # NB: the filename must NOT contain the sentinel — the typed `sh <path>`
         # line is echoed into the pane, and polling would match it before the
         # command had run at all.

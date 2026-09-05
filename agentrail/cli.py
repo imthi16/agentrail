@@ -1,7 +1,8 @@
 """AgentRail CLI (Typer). Commands orchestrate; subsystem logic lives elsewhere.
 
-v0.1 exposes ``version``, ``init``, ``plan``, and ``status``. Later stages add
-``run``, ``pause``, ``resume``, and ``rollback``.
+Exposes ``version``, ``init``, ``plan``, ``approve``, ``status``, ``run``,
+``pause``, ``resume``, ``rollback``, and ``ready``. Commands orchestrate only;
+policy, git, tmux, and checkpoint logic live in the subpackages.
 """
 
 from __future__ import annotations

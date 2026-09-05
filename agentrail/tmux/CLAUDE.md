@@ -32,6 +32,32 @@ pane.send_keys('pytest -q; echo "__AGENTRAIL_DONE_%s__"' % run_id, enter=True)
 # poll capture_pane() until the marker line is present, then read the buffer
 ```
 
+## run_result: exit codes out of a pane (the contract)
+`run_result()` is what the run loop uses; `run()` is the older raise-on-timeout
+wrapper. Hard-won details — change these only with the tests in hand:
+- The command is written to a **script file** and only `sh <path>` is typed.
+  Sending a long quoted script as keystrokes is fragile: it wraps, and line
+  editors with heavy prompts mangle it.
+- The script filename must **not** contain the sentinel — the typed line is
+  echoed into the pane, and polling would match it before the command ran.
+- The command runs in a **subshell** so a command calling `exit` cannot skip the
+  status line (indistinguishable from a timeout otherwise).
+- Completion marker is `<sentinel> rc=$?`; `sh` keeps `$?` working whatever the
+  user's login shell is (fish has none). Marker present but rc unparseable ⇒
+  `exit_code=None`, treated as failure. Never assume success.
+- AgentRail sessions set `default-shell` to `sh`: a heavyweight login shell can
+  take seconds to start reading stdin and **silently drop the sent keys**, which
+  looks exactly like a hung harness. This was an observed flake, not a theory.
+- A **timeout returns** `PaneResult(timed_out=True)` rather than raising, and the
+  runner neither rolls back nor kills the pane — the harness may still be writing
+  into the worktree, and the pane is the operator's only forensic surface.
+- Capture uses `capture-pane -p -S -` for scrollback; output is still capped by
+  the server's `history-limit` (default 2000 lines).
+- One window per attempt (`run-<span>`): a resumed stage reuses its session, and
+  a fixed name would stack windows so `capture()` reads the wrong one.
+- tmux hard-wraps at the pane width, so a long path/line may span captured lines
+  — join before matching in assertions.
+
 ## Persistence & observability
 - Set window option `remain-on-exit on` so a finished/failed process leaves the
   pane inspectable; use `respawn-pane` to restart.
