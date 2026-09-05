@@ -122,6 +122,21 @@ class CheckpointStore:
             raise CheckpointError(f"no checkpoint {checkpoint_id} for stage {stage_id}")
         return head_file.read_text(encoding="utf-8").strip()
 
+    def record_tmux(self, stage_id: str, checkpoint_id: str, tmux: dict[str, str]) -> None:
+        """Attach pane IDs to an existing checkpoint (idempotent).
+
+        The checkpoint is taken *before* the harness starts, so the pane does not
+        exist yet at creation time; the runner calls this once it does, which is
+        what makes :meth:`read_tmux` meaningful for rollback and reattach.
+        """
+
+        cp_dir = checkpoints_dir(self.repo_root, stage_id) / checkpoint_id
+        if not cp_dir.exists():
+            raise CheckpointError(f"no checkpoint {checkpoint_id} for stage {stage_id}")
+        (cp_dir / "tmux.json").write_text(
+            json.dumps(tmux, indent=2, sort_keys=True), encoding="utf-8"
+        )
+
     def read_tmux(self, stage_id: str, checkpoint_id: str) -> dict[str, str]:
         cp_dir = checkpoints_dir(self.repo_root, stage_id) / checkpoint_id
         tmux_file = cp_dir / "tmux.json"

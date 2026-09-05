@@ -19,6 +19,7 @@ from agentrail.adapters import (
     HarnessAdapter,
     JcodeAdapter,
     OpencodeApiAdapter,
+    SessionHandle,
 )
 from agentrail.checkpoints import CheckpointStore, SemanticEditGuard, build_edit_guard
 from agentrail.config import Config, load_config
@@ -43,7 +44,14 @@ from agentrail.profiles import (
     RoleBindSpec,
     WorkKind,
 )
-from agentrail.tmux import tmux_available
+from agentrail.tmux import (
+    HarnessExecutor,
+    PaneHandle,
+    TmuxHarnessExecutor,
+    TmuxSupervisor,
+    TmuxUnavailableError,
+    tmux_available,
+)
 from agentrail.workflow import save_workflow, topological_order
 from agentrail.workspaces import WorktreeManager
 
@@ -89,6 +97,8 @@ class WorkflowRunner:
     # `agentrail run --no-guard`: a default-on destructive feature needs an off
     # switch that is not a YAML edit.
     guard_enabled: bool = True
+    # Injected in tests so the suite never depends on a real tmux server.
+    executor: HarnessExecutor | None = None
 
     def __post_init__(self) -> None:
         self._log = EventLog(self.root)
@@ -99,6 +109,7 @@ class WorkflowRunner:
         self._budget = self._config.budget
         self._router: ModelRouter | None = None
         self._tracker: BudgetTracker | None = None
+        self._executor = self._resolve_executor()
         # Built here rather than in cli.py so every entry point (CLI, tests,
         # library callers) gets the guard the invariant advertises. An explicitly
         # injected guard still wins.
@@ -120,6 +131,64 @@ class WorkflowRunner:
             role: RoleBindSpec(provider=bind.provider, tier=bind.tier)
             for role, bind in self._config.roles.items()
         }
+
+    def _resolve_executor(self) -> HarnessExecutor | None:
+        """Build the tmux executor once, or None to fall back to direct start().
+
+        Resolved here rather than probed per stage so the run loop's behaviour
+        does not depend on the ambient environment mid-run.
+        """
+
+        if self.executor is not None:
+            return self.executor
+        if not self._config.tmux.enabled or not tmux_available():
+            return None
+        try:
+            supervisor = TmuxSupervisor(socket_name=self._config.tmux.socket_name)
+        except TmuxUnavailableError:
+            return None
+        return TmuxHarnessExecutor(
+            supervisor=supervisor,
+            timeout=self._config.tmux.timeout_seconds,
+        )
+
+    def _supervise(self, adapter: HarnessAdapter) -> bool:
+        """True when this adapter's run should go through a tmux pane."""
+
+        return self._executor is not None and adapter.capabilities().process_backed
+
+    def _run_harness(
+        self,
+        adapter: HarnessAdapter,
+        prompt: str,
+        *,
+        stage: Stage,
+        profile: Profile,
+        worktree_path: Path,
+        attempt: str,
+    ) -> tuple[SessionHandle, PaneHandle | None, bool, int | None]:
+        """Run the harness, supervised when possible. Never a bare Popen."""
+
+        if self._executor is not None and self._supervise(adapter):
+            argv = adapter.build_argv(prompt, mode=self.mode, model_id=profile.model_id)
+            result = self._executor.run_argv(
+                stage_id=stage.id,
+                adapter_name=adapter.name,
+                argv=argv,
+                cwd=worktree_path,
+                attempt=attempt,
+            )
+            return result.handle, result.pane, result.timed_out, result.exit_code
+
+        # API-backed adapters (and tmux-less environments) run directly.
+        handle = adapter.start(
+            prompt,
+            mode=self.mode,
+            model_id=profile.model_id,
+            cwd=worktree_path,
+            dry_run=False,
+        )
+        return handle, None, False, None
 
     def _adapter_for(self, provider: Provider) -> HarnessAdapter:
         if provider is Provider.OPENCODE:
@@ -228,7 +297,7 @@ class WorkflowRunner:
 
         prompt = f"{stage.title}. {stage.description}".strip()
         argv = adapter.build_argv(prompt, mode=self.mode, model_id=profile.model_id)
-        use_tmux = tmux_available()
+        use_tmux = self._supervise(adapter)
         checkpoint_id: str | None = None
         pr_head = f"stage/{stage.id}"
 
@@ -294,6 +363,29 @@ class WorkflowRunner:
         # Authorize the harness launch through the policy gate (invariant #1).
         # A mutating harness is an EDIT against the worktree; plan mode denies,
         # manual asks, accept_edits/auto allow (auto bounded by the Intent Lock).
+        # Distinguish "this harness isn't installed / configured" from "it ran and
+        # failed". Without this an unset OPENCODE_API_KEY surfaced as the
+        # misleading "harness did not start", and the default roles table binds
+        # `research` to OpenCode, so research stages hit it routinely.
+        if not adapter.available():
+            stage.status = StageStatus.FAILED
+            self._log.emit(
+                type="stage.failed",
+                workflow_id=workflow.workflow_id,
+                trace_id=trace,
+                span_id=span,
+                stage_id=stage.id,
+                mode=self.mode,
+                attributes={
+                    "reason": f"adapter {adapter.name} unavailable",
+                    "provider": profile.provider.value,
+                },
+            )
+            raise StageBlockedError(
+                f"stage {stage.id!r} failed: adapter {adapter.name!r} is unavailable "
+                f"(provider {profile.provider.value!r})"
+            )
+
         auth = gate.authorize_session(argv)
         if not auth.performed:
             self._checkpoints.rollback(stage.id, Path(worktree.path), checkpoint_id)
@@ -311,13 +403,42 @@ class WorkflowRunner:
                 f"stage {stage.id!r} blocked: harness launch denied ({auth.reason})"
             )
 
-        handle = adapter.start(
+        handle, pane, timed_out, exit_code = self._run_harness(
+            adapter,
             prompt,
-            mode=self.mode,
-            model_id=profile.model_id,
-            cwd=Path(worktree.path),
-            dry_run=False,
+            stage=stage,
+            profile=profile,
+            worktree_path=Path(worktree.path),
+            attempt=span,
         )
+        if pane is not None and checkpoint_id is not None:
+            # Now that the pane exists, record it against the checkpoint taken
+            # before the harness ran, so rollback/reattach can find it.
+            self._checkpoints.record_tmux(stage.id, checkpoint_id, pane.as_dict())
+        if timed_out:
+            # Deliberately NO rollback and NO pane kill: the harness may still be
+            # writing into this worktree, so `git reset --hard` would race it, and
+            # the pane is the operator's only forensic surface.
+            stage.status = StageStatus.FAILED
+            self._log.emit(
+                type="stage.timeout",
+                workflow_id=workflow.workflow_id,
+                trace_id=trace,
+                span_id=span,
+                stage_id=stage.id,
+                mode=self.mode,
+                attributes={
+                    "timeout_seconds": self._config.tmux.timeout_seconds,
+                    "pane_id": pane.pane_id if pane else None,
+                    "session_id": pane.session_id if pane else None,
+                    "argv": argv,
+                },
+            )
+            raise StageBlockedError(
+                f"stage {stage.id!r} timed out after "
+                f"{self._config.tmux.timeout_seconds}s; the pane was left running "
+                f"for inspection (tmux attach -t agentrail-{stage.id})"
+            )
         if not handle.started:
             # Harness missing or exited nonzero: do not mark the stage complete.
             stage.status = StageStatus.FAILED
@@ -328,7 +449,12 @@ class WorkflowRunner:
                 span_id=span,
                 stage_id=stage.id,
                 mode=self.mode,
-                attributes={"reason": "harness did not start", "argv": argv},
+                attributes={
+                    "reason": "harness did not start",
+                    "argv": argv,
+                    "exit_code": exit_code,
+                    "output_tail": handle.output.splitlines()[-20:],
+                },
             )
             raise StageBlockedError(
                 f"stage {stage.id!r} failed: harness did not start ({argv[0]!r})"

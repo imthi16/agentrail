@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from agentrail.adapters import Capabilities
 from agentrail.config import init_config
 from agentrail.events import EventLog
 from agentrail.models import Mode, WorkflowStatus
@@ -16,10 +17,22 @@ from agentrail.workspaces import worktree_path
 GOAL = "Implement login and logout as separate PRs"
 
 
+def _fake_capabilities() -> Capabilities:
+    """Fakes declare process_backed=False so the suite never needs a tmux server."""
+
+    return Capabilities(non_interactive=True, process_backed=False, edits_files=True)
+
+
 class FakeAdapter:
     """A no-op adapter so runner tests never spawn a real harness."""
 
     name = "fake"
+
+    def available(self) -> bool:
+        return True
+
+    def capabilities(self) -> Capabilities:
+        return _fake_capabilities()
 
     def build_argv(self, prompt: str, *, mode: Mode, model_id: str | None) -> list[str]:
         return ["fake", "run", prompt]
@@ -267,6 +280,12 @@ class FailingAdapter:
 
     name = "failing"
 
+    def available(self) -> bool:
+        return True
+
+    def capabilities(self) -> Capabilities:
+        return _fake_capabilities()
+
     def build_argv(self, prompt: str, *, mode: Mode, model_id: str | None) -> list[str]:
         return ["failing", "run", prompt]
 
@@ -335,6 +354,12 @@ def test_stage_changes_are_committed_into_the_branch(temp_git_repo: Path) -> Non
     class EditingAdapter:
         name = "editing"
 
+        def available(self) -> bool:
+            return True
+
+        def capabilities(self) -> Capabilities:
+            return _fake_capabilities()
+
         def build_argv(self, prompt: str, *, mode: Mode, model_id: str | None) -> list[str]:
             return ["editing"]
 
@@ -384,6 +409,12 @@ class BrokenPythonAdapter:
     """Writes unparseable Python, the exact blast radius the guard exists for."""
 
     name = "broken"
+
+    def available(self) -> bool:
+        return True
+
+    def capabilities(self) -> Capabilities:
+        return _fake_capabilities()
 
     def build_argv(self, prompt: str, *, mode: Mode, model_id: str | None) -> list[str]:
         return ["broken"]
