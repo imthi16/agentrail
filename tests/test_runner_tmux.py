@@ -228,3 +228,84 @@ def test_unavailable_adapter_reports_that_rather_than_did_not_start(temp_git_rep
 
     failed = [e for e in EventLog(temp_git_repo).read() if e.type == "stage.failed"]
     assert "unavailable" in str(failed[0].attributes["reason"])
+
+
+def test_model_not_applied_is_logged_rather_than_silently_dropped(temp_git_repo: Path) -> None:
+    """Routing stays auditable even when the harness cannot receive the model."""
+
+    init_config(temp_git_repo)
+    workflow = _approved(temp_git_repo)
+    runner = WorkflowRunner(
+        temp_git_repo,
+        adapter=ProcessAdapter(),  # type: ignore[arg-type]
+        executor=RecordingExecutor(writes_file="feature.txt"),
+    )
+    report = runner.run(workflow)
+
+    events = EventLog(temp_git_repo).read()
+    invocations = [e for e in events if e.type == "harness.invocation"]
+    assert invocations, "every stage records what was actually invoked"
+    assert invocations[0].attributes["model_applied"] is False
+    assert invocations[0].attributes["model_id"]
+
+    not_applied = [e for e in events if e.type == "profile.model_not_applied"]
+    assert not_applied
+    assert not_applied[0].attributes["adapter"] == "proc"
+    assert all(plan.model_applied is False for plan in report.stages)
+    assert all(plan.model_id for plan in report.stages), "the routed model is still reported"
+
+
+def test_model_applied_when_the_adapter_supports_selection(temp_git_repo: Path) -> None:
+    class SelectingAdapter(ProcessAdapter):
+        name = "selecting"
+
+        def capabilities(self) -> Capabilities:
+            return Capabilities(process_backed=True, model_selection=True, edits_files=True)
+
+    init_config(temp_git_repo)
+    workflow = _approved(temp_git_repo)
+    runner = WorkflowRunner(
+        temp_git_repo,
+        adapter=SelectingAdapter(),  # type: ignore[arg-type]
+        executor=RecordingExecutor(writes_file="feature.txt"),
+    )
+    report = runner.run(workflow)
+
+    events = EventLog(temp_git_repo).read()
+    assert not [e for e in events if e.type == "profile.model_not_applied"]
+    assert all(plan.model_applied for plan in report.stages)
+
+
+def test_provider_adapter_mapping_from_config_selects_the_harness(temp_git_repo: Path) -> None:
+    from agentrail.config import HarnessSettings
+    from agentrail.models import Provider
+
+    write_config(
+        temp_git_repo,
+        Config(harness_options=HarnessSettings(provider_adapters={Provider.ZAI: "codex"})),
+    )
+    runner = WorkflowRunner(temp_git_repo, executor=RecordingExecutor())
+    assert runner._adapter_for(Provider.ZAI).name == "codex"
+    # Unmapped providers still fall back to the default harness.
+    assert runner._adapter_for(Provider.ANTHROPIC).name == "jcode"
+
+
+def test_jcode_model_flag_is_read_from_config(temp_git_repo: Path) -> None:
+    from agentrail.config import HarnessSettings
+
+    write_config(temp_git_repo, Config(harness_options=HarnessSettings(model_flag="--model")))
+    runner = WorkflowRunner(temp_git_repo, executor=RecordingExecutor())
+    assert runner._adapter.capabilities().model_selection is True
+
+
+def test_no_changes_event_for_an_advisory_adapter(temp_git_repo: Path) -> None:
+    """An API/chat adapter leaves a clean worktree; that is expected, not a bug."""
+
+    init_config(temp_git_repo)
+    workflow = _approved(temp_git_repo)
+    runner = WorkflowRunner(temp_git_repo, adapter=ApiAdapter())  # type: ignore[arg-type]
+    runner.run(workflow)
+
+    no_changes = [e for e in EventLog(temp_git_repo).read() if e.type == "stage.no_changes"]
+    assert no_changes
+    assert no_changes[0].attributes["advisory_only"] is True

@@ -18,7 +18,7 @@ from agentrail.config import config_path, init_config, load_config
 from agentrail.events import EventLog, new_id
 from agentrail.git import PullRequestError, PullRequestManager
 from agentrail.models import Stage, Workflow, WorkflowStatus
-from agentrail.runner import StageBlockedError, WorkflowRunner
+from agentrail.runner import StageBlockedError, StagePlan, WorkflowRunner
 from agentrail.workflow import (
     WorkflowValidationError,
     load_workflow,
@@ -229,6 +229,15 @@ def ready(
     console.print(f"Promoted {promoted}/{len(targets)} PR(s) to ready.")
 
 
+def _stage_committed(root: Path, plan: StagePlan) -> bool:
+    """True unless the run loop recorded a `stage.no_changes` for this stage."""
+
+    return not any(
+        event.type == "stage.no_changes" and event.stage_id == plan.stage_id
+        for event in EventLog(root).read()
+    )
+
+
 def _render_stages(stages: list[Stage]) -> None:
     table = Table(show_header=True, header_style="bold")
     table.add_column("id")
@@ -313,15 +322,28 @@ def run(
     table.add_column("base")
     table.add_column("PR base -> head")
     table.add_column("tmux")
+    table.add_column("model")
     for plan in report.stages:
+        model = plan.model_id or "-"
+        if plan.model_id and not plan.model_applied:
+            # Routed and logged, but the harness never receives it.
+            model = f"{plan.model_id} (routed, not applied)"
         table.add_row(
             plan.stage_id,
             plan.worktree_branch,
             plan.worktree_base,
             f"{plan.pr_base} -> {plan.pr_head}",
             "yes" if plan.ran_in_tmux else "no",
+            model,
         )
     console.print(table)
+
+    empty = [p.stage_id for p in report.stages if p.performed and not _stage_committed(root, p)]
+    for stage_id in empty:
+        console.print(
+            f"[yellow]Stage {stage_id!r} produced no changes[/yellow] — its branch is empty, "
+            "so the PR has nothing to review."
+        )
 
 
 @app.command()

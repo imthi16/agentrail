@@ -20,6 +20,7 @@ from agentrail.adapters import (
     JcodeAdapter,
     OpencodeApiAdapter,
     SessionHandle,
+    get_adapter,
 )
 from agentrail.checkpoints import CheckpointStore, SemanticEditGuard, build_edit_guard
 from agentrail.config import Config, load_config
@@ -73,6 +74,12 @@ class StagePlan:
     harness_argv: list[str]
     ran_in_tmux: bool
     performed: bool
+    provider: str = ""
+    model_id: str = ""
+    # False means the model was routed and logged but the harness never received
+    # it (no verified flag for that harness) — visible, not a silent no-op.
+    model_applied: bool = False
+    pane_id: str | None = None
 
 
 @dataclass
@@ -91,7 +98,7 @@ class WorkflowRunner:
     root: Path
     mode: Mode = Mode.ACCEPT_EDITS
     default_base: str = "main"
-    adapter: HarnessAdapter = field(default_factory=JcodeAdapter)
+    adapter: HarnessAdapter | None = None
     provider: Provider = Provider.ANTHROPIC
     edit_guard: SemanticEditGuard | None = None
     # `agentrail run --no-guard`: a default-on destructive feature needs an off
@@ -107,6 +114,9 @@ class WorkflowRunner:
         self._prs = PullRequestManager(self.root, default_base=self.default_base)
         self._config = self._load_config()
         self._budget = self._config.budget
+        if self.adapter is None:
+            self.adapter = self._build_adapter(self._config.harness)
+        self._adapter: HarnessAdapter = self.adapter
         self._router: ModelRouter | None = None
         self._tracker: BudgetTracker | None = None
         self._executor = self._resolve_executor()
@@ -190,10 +200,32 @@ class WorkflowRunner:
         )
         return handle, None, False, None
 
+    def _build_adapter(self, name: str) -> HarnessAdapter:
+        """Construct a named adapter, injecting operator-configured settings."""
+
+        if name == "opencode":
+            return OpencodeApiAdapter(settings=self._config.opencode)
+        if name == "jcode":
+            return JcodeAdapter(
+                model_flag=self._config.harness_options.model_flag,
+                extra_args=list(self._config.harness_options.extra_args),
+            )
+        return get_adapter(name)
+
     def _adapter_for(self, provider: Provider) -> HarnessAdapter:
+        """Pick the adapter for a routed provider.
+
+        An explicit provider -> adapter mapping wins, so routing can actually
+        change which harness runs. The map is empty by default, preserving the
+        previous behaviour.
+        """
+
+        mapped = self._config.harness_options.provider_adapters.get(provider)
+        if mapped is not None:
+            return self._build_adapter(mapped)
         if provider is Provider.OPENCODE:
             return OpencodeApiAdapter(settings=self._config.opencode)
-        return self.adapter
+        return self._adapter
 
     def run(self, workflow: Workflow, *, dry_run: bool = False) -> RunReport:
         """Run every stage in dependency order; persist status transitions."""
@@ -313,6 +345,9 @@ class WorkflowRunner:
                 harness_argv=argv,
                 ran_in_tmux=use_tmux,
                 performed=False,
+                provider=profile.provider.value,
+                model_id=profile.model_id,
+                model_applied=adapter.capabilities().model_selection,
             )
 
         # --- Real execution path -------------------------------------------
@@ -401,6 +436,43 @@ class WorkflowRunner:
             )
             raise StageBlockedError(
                 f"stage {stage.id!r} blocked: harness launch denied ({auth.reason})"
+            )
+
+        caps = adapter.capabilities()
+        model_applied = caps.model_selection and profile.model_id != ""
+        self._log.emit(
+            type="harness.invocation",
+            workflow_id=workflow.workflow_id,
+            trace_id=trace,
+            span_id=span,
+            stage_id=stage.id,
+            mode=self.mode,
+            attributes={
+                "adapter": adapter.name,
+                "provider": profile.provider.value,
+                "tier": profile.tier.value,
+                "model_id": profile.model_id,
+                "model_applied": model_applied,
+                "ran_in_tmux": use_tmux,
+            },
+        )
+        if not model_applied:
+            # The routing decision is real and auditable even when the harness
+            # cannot receive the model: surface it rather than pretending the
+            # profile subsystem changed the invocation.
+            self._log.emit(
+                type="profile.model_not_applied",
+                workflow_id=workflow.workflow_id,
+                trace_id=trace,
+                span_id=span,
+                stage_id=stage.id,
+                mode=self.mode,
+                attributes={
+                    "adapter": adapter.name,
+                    "provider": profile.provider.value,
+                    "model_id": profile.model_id,
+                    "reason": f"{adapter.name} exposes no verified model flag",
+                },
             )
 
         handle, pane, timed_out, exit_code = self._run_harness(
@@ -517,6 +589,24 @@ class WorkflowRunner:
         # Commit the stage's worktree changes so they land in the PR, and push
         # the branch when a remote is available (verified git/gh commands).
         committed = self._commit_stage(stage, Path(worktree.path))
+        if not committed:
+            # An advisory adapter (chat/API) legitimately leaves a clean worktree;
+            # a process harness leaving one means it did nothing. Either way the
+            # branch is empty, so `gh pr create` would fail on a repo with a
+            # remote -- surface it instead of failing opaquely later.
+            self._log.emit(
+                type="stage.no_changes",
+                workflow_id=workflow.workflow_id,
+                trace_id=trace,
+                span_id=span,
+                stage_id=stage.id,
+                mode=self.mode,
+                attributes={
+                    "adapter": adapter.name,
+                    "advisory_only": not caps.edits_files,
+                    "output": handle.output[:2000],
+                },
+            )
 
         pr_ref = self._prs.create_for_stage(stage, workflow, dry_run=not self._prs_ready())
         stage.pull_request = pr_ref
@@ -547,6 +637,10 @@ class WorkflowRunner:
             harness_argv=argv,
             ran_in_tmux=use_tmux,
             performed=True,
+            provider=profile.provider.value,
+            model_id=profile.model_id,
+            model_applied=model_applied,
+            pane_id=pane.pane_id if pane else None,
         )
 
     def _stage_base(self, stage: Stage, workflow: Workflow) -> str:
